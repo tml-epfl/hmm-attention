@@ -1,0 +1,17 @@
+_target_: src.data.GaussianARClassification
+window: 3
+dim: 50
+number:
+  train: 9000
+  val: 3000
+length: 20
+sigma_err: 0
+sigma_data: 0
+softmax: true
+temperature: 0.1
+unroll_sequences: false
+one_hot: true
+random_sampling: false
+use_full_prefix: false
+prefix_length: -1
+replicate_context_for_spans: false

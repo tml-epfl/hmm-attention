@@ -1,0 +1,9 @@
+# @package _global_
+defaults:
+  - override /teacher: semantic_baseline
+
+teacher:
+  per_head_alpha: 1.9
+
+dataset:
+  use_full_prefix: true

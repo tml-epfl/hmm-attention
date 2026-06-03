@@ -1,0 +1,18 @@
+# @package _global_
+
+defaults:
+  - /train
+  - override /experiments: full_disection
+  - _self_
+
+misc:
+  wandb:
+    tags: ["init-ablation"]
+
+student:
+  value_init_scale: 0.
+
+hydra:
+  sweeper:
+    params:
+      student.query_init_scale: 0.,1e-3,1e-6,1e-9

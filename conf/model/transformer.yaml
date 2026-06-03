@@ -1,0 +1,29 @@
+_target_: src.model.TransformerDecoder
+dim: -1
+hidden_dim: 255
+ff_hidden_dim: 64
+num_heads: 3
+num_blocks: 1
+dropout: 0.1
+encoder_layer: true
+decoder_layer: true
+init_scale: 1
+skip_connection: true
+layer_normalization: true
+use_query_projection: true
+use_key_projection: true
+use_value_projection: true
+use_output_projection: true
+use_mlp: true
+teacher_readout: false
+semantic_baseline: false
+attention_disentanglement: false
+attention_bias: true
+per_head_alpha: null
+pe_type: absolute                       # Options: "none", "absolute", "one_hot"
+pe_learnable: true                      # absolute: true=learned, false=sinusoidal
+pe_max_sequence_length: 50              # absolute: max supported length
+pe_embedding_dim: -1                    # absolute, one_hot: set in runner
+value_init_scale: null                  # When provided, initialize value weights with uniform(-scale, scale) instead of xavier
+query_init_scale: null                  # When provided, initialize query weights with uniform(-scale, scale) instead of xavier
+teacher_target: false

@@ -1,0 +1,8 @@
+{
+  "jupyter.notebookFileRoot": "${workspaceFolder}",
+  "python.analysis.extraPaths": ["${workspaceFolder}"],
+  "python.envFile": "${workspaceFolder}/.env",
+  "files.watcherExclude": {
+    "**/target": true
+  }
+}

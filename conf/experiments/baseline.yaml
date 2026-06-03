@@ -1,0 +1,15 @@
+# @package _global_
+
+defaults:
+  - /train
+  - _self_
+
+teacher:
+  span_lengths: [4, 4, 4]
+
+student:
+  attention_bias: false
+
+misc:
+  wandb:
+    tags: ["baseline"]

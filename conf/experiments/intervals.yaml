@@ -1,0 +1,3 @@
+# @package _global_
+teacher:
+  span_lengths: [2, 4, 8]

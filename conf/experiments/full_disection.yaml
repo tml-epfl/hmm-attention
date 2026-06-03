@@ -1,0 +1,20 @@
+# @package _global_
+student:
+  dropout: 0.0
+  use_key_projection: false
+  layer_normalization: false
+  use_mlp: false
+  teacher_readout: false
+  use_output_projection: false
+  skip_connection: false
+  attention_disentanglement: true
+  pe_type: one_hot
+  identity_decoder: true
+  attention_bias: false
+
+misc:
+  wandb:
+    tags: ["ICML-minimal"]
+
+optimizer:
+  lr: 0.08

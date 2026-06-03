@@ -1,0 +1,13 @@
+# @package _global_
+
+defaults:
+  - /train
+  - override /experiments: full_disection
+  - _self_
+
+misc:
+  wandb:
+    tags: ["non-uniform-spans"]
+
+teacher:
+  span_position_weights: [0.7, 0.3]

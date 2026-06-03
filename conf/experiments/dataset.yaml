@@ -1,0 +1,9 @@
+defaults:
+  - train
+  - override hydra/launcher: ray
+
+hydra:
+  sweeper:
+    params:
+      experiments: full_disection, baseline
+      dataset.number.train: [100, 400, 2000, 3000, 6000, 9000]

@@ -1,0 +1,19 @@
+defaults:
+  - _self_
+  - dataset: classification/softmax
+  - model@teacher: linear
+  - model@student: transformer
+  - model@ngrams.unigram: unigram
+  - model@ngrams.bigram: bigram
+  - model@ngrams.trigram: trigram
+  - loss: ce
+  - optimizer: adamw
+  - scheduler: reduce_on_plateu
+  - trainer: sgd
+  - misc: default
+  - experiments: null
+  - override hydra/launcher: ray
+
+hydra:
+  job:
+    chdir: true

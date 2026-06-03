@@ -1,0 +1,11 @@
+# @package _global_
+
+teacher:
+  span_lengths: [4, 4, 4]
+
+student:
+  attention_bias: false
+
+misc:
+  wandb:
+    tags: ["ICML-full-1layer"]

@@ -1,0 +1,15 @@
+# @package _global_
+defaults:
+  - override /model@student: linear
+  - override /model@ngrams.unigram: null
+  - override /model@ngrams.bigram: null
+  - override /model@ngrams.trigram: null
+
+student:
+  window: 1
+  span_lengths: [2]
+  multiplicative_constant: 1.0
+
+trainer:
+  epochs: 500
+  ngram_epochs: 0

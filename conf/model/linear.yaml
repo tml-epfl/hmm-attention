@@ -1,0 +1,12 @@
+_target_: src.model.VectorARModel.from_parameters
+dim: -1
+rank: -1
+window: -1
+scale: 1
+multiplicative_constant: 1.7
+reverse_constants: false
+shared_matrix_across_lags: false
+orthogonal_matrices: false
+span_lengths: [2, 2, 2]
+stride: null  # stride between interval start positions; null = non-overlapping (sum of span_lengths)
+span_position_weights: null  # e.g., [0.7, 0.3] for weighted positions within each span

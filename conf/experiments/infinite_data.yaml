@@ -1,0 +1,9 @@
+# @package _global_
+
+experiments: full_disection
+student:
+  value_init_scale: 0
+  query_init_scale: 1e-9
+dataset:
+  number:
+    train: -512 # Infinite data (batch size of 512)

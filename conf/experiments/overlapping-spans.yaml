@@ -1,0 +1,21 @@
+# @package _global_
+
+defaults:
+  - /train
+  - override /experiments: full_disection
+  - _self_
+
+misc:
+  wandb:
+    tags: ["overlapping-spans"]
+
+teacher:
+  span_lengths: [4, 4, 4]
+
+student: 
+  num_heads: 4
+
+hydra:
+  sweeper:
+    params:
+      teacher.stride: 2 # 4 should be equivalent to non-overlapping

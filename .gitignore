@@ -1,0 +1,17 @@
+__pycache__/
+results/
+figures/fig1/results/
+figures/init-scales-ablation/results/
+figures/.cache/
+outputs/
+results.csv
+.DS_Store
+.env
+notebooks/
+artifacts/
+CLAUDE.md
+.venv/
+*.pyc
+analysis/figures/
+multirun/
+figures/*.pdf

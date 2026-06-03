@@ -1,0 +1,34 @@
+# @package _global_
+
+defaults:
+  - /train
+  - override /optimizer: sgd
+  - override /experiments: null
+  - _self_
+
+misc:
+  log_attention_frequency: 1000000 # deactivate attention logging
+  wandb:
+    tags: ["sgd-full-4layer"]
+  
+trainer:
+  ngram_steps: 0
+  steps: 100000
+
+teacher:
+  span_lengths: [4, 4, 4]
+
+student:
+  attention_bias: false
+  num_blocks: 4
+
+dataset:
+  number:
+    train: 99000
+  dim: 100
+
+hydra:
+  sweeper:
+    params:
+      teacher.multiplicative_constant: 1.8, 2.1
+      optimizer.lr: 0.008, 0.002

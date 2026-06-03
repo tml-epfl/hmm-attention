@@ -1,0 +1,10 @@
+defaults:
+  - transformer  # pulls the main transformer configuration
+  - _self_       # load this file last so it can be overridden
+
+# Remove positional information using flat parameters
+pe_type: none
+
+# Set geometric per-head scaling factor.
+semantic_baseline: true
+per_head_alpha: 1.9

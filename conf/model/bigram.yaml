@@ -1,0 +1,5 @@
+defaults:
+  - transformer  # inherit *all* shared fields
+  - _self_
+ngram: 2                
+_target_: src.model.NgramTransformerDecoder

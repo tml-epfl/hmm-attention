@@ -1,0 +1,26 @@
+# @package _global_
+
+defaults:
+  - /train
+  - override /optimizer: sgd
+  - override /experiments: null
+  - _self_
+
+misc:
+  log_attention_frequency: 200
+  wandb:
+    tags: ["sgd-full-1layer"]
+  
+trainer:
+  ngram_steps: 3000
+  steps: 6000
+
+teacher:
+  span_lengths: [4, 4, 4]
+  multiplicative_constant: 2.0
+
+student:
+  attention_bias: false
+
+optimizer:
+  lr: 0.2

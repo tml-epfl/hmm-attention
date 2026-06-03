@@ -1,0 +1,10 @@
+seed: 0
+device: cuda
+verbose: true
+log_attention_frequency: 50
+wandb:
+  use: true
+  project: incremental-learning
+  entity: r-alvarezlucendo16
+  tags: []
+

@@ -1,0 +1,16 @@
+# @package hydra.launcher
+_target_: hydra_plugins.hydra_ray_launcher.ray_launcher.RayLauncher
+
+ray:
+  init:
+    # Ray will auto-detect GPUs available in the environment
+    # Leave address as null to start a new local Ray cluster
+    address: null
+    logging_level: info
+    num_cpus: null  # Auto-detect
+    num_gpus: null  # Auto-detect
+
+  remote:
+    # Each Hydra run gets exactly 1 GPU
+    num_gpus: 1
+    num_cpus: null  # Auto-detect
