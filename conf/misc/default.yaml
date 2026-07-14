@@ -4,7 +4,7 @@ verbose: true
 log_attention_frequency: 50
 wandb:
   use: true
-  project: incremental-learning
-  entity: r-alvarezlucendo16
+  project: hmm-attention
+  entity: okyksl
   tags: []
 

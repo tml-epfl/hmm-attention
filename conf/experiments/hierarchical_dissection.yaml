@@ -1,0 +1,43 @@
+# @package _global_
+defaults:
+  - /train
+  - override /dataset: classification/hierarchical
+  - _self_
+
+teacher:
+  span_lengths: [1, 1, 1]          # prefix = 3 hidden tokens; observed len = (3+20)*2 = 46
+  multiplicative_constant: 1.7
+
+dataset:
+  window: 3
+  dim: 64                          # hidden vocab
+  chunk_dim: 64                    # surface vocab
+  chunk_size: 2
+  length: 20
+  number:
+    train: 9000
+    val: 3000
+  temperature: 0.1
+  replicate_context_for_spans: false
+
+student:
+  dim: 64                          # = chunk_dim
+  pe_max_sequence_length: 64
+  dropout: 0.0
+  use_key_projection: false
+  layer_normalization: false
+  use_mlp: false
+  teacher_readout: false
+  use_output_projection: false
+  skip_connection: false
+  attention_disentanglement: true
+  pe_type: one_hot
+  identity_decoder: true
+  attention_bias: false
+
+optimizer:
+  lr: 0.08
+
+misc:
+  wandb:
+    tags: ["hierarchical-dissection", "span-1-1-1"]
