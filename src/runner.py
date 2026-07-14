@@ -9,7 +9,6 @@ from torch.utils.data import DataLoader, RandomSampler
 
 from src.trainer import Trainer
 from src.model import LinearARModel
-from src.data import HierarchicalGaussianARClassification
 
 def _pass_sched_metric(
     scheduler: torch.optim.lr_scheduler._LRScheduler,
@@ -33,16 +32,18 @@ def _calculate_context_length(span_lengths, stride=None):
     return sum(span_lengths)
 
 
-def _configure_positional_encoding(cfg):
-    """Configure positional encoding."""
+def _configure_positional_encoding(cfg, teacher):
+    """Configure positional encoding using the *instantiated* teacher's surface-space
+    span structure. Runs after teacher instantiation so it can rely on teacher-side
+    knowledge (e.g. HierarchicalTeacher exposes surface-scaled span_lengths/stride)."""
     if "student" in cfg and "pe_type" in cfg.student:
         pe_type = cfg.student["pe_type"]
 
-        # Get stride from teacher config (may be None)
-        stride = cfg.teacher.get("stride", None)
+        span_lengths = list(teacher.span_lengths)
+        stride = getattr(teacher, "stride", None)
 
         if pe_type == "one_hot":
-            prefix_length = _calculate_context_length(cfg.teacher.span_lengths, stride)
+            prefix_length = _calculate_context_length(span_lengths, stride)
             embedding_dim = prefix_length + cfg.dataset.length - 1
             cfg.student.hidden_dim = cfg.dataset.dim + embedding_dim
             cfg.student.pe_embedding_dim = embedding_dim
@@ -58,10 +59,10 @@ def _configure_positional_encoding(cfg):
                 ngram = ngram_cfg.ngram
                 if stride is not None:
                     # With stride: (ngram - 1) * stride + last_span_length
-                    embedding_dim = (ngram - 1) * stride + cfg.teacher.span_lengths[ngram - 1]
+                    embedding_dim = (ngram - 1) * stride + span_lengths[ngram - 1]
                 else:
                     # Without stride: sum of first ngram spans
-                    embedding_dim = sum(cfg.teacher.span_lengths[:ngram])
+                    embedding_dim = sum(span_lengths[:ngram])
                 hidden_dim = cfg.dataset.dim + embedding_dim
             else:
                 embedding_dim = cfg.student.pe_embedding_dim
@@ -116,8 +117,6 @@ def _preprocess_cfg(cfg: DictConfig) -> DictConfig:
             merged_cfg.ngram = ngram_cfg.ngram
             # Add conf
             cfg.ngrams[name] = merged_cfg
-
-    _configure_positional_encoding(cfg)
 
     return cfg
 
@@ -184,6 +183,14 @@ def get_trainer(cfg: DictConfig) -> Trainer:
     # preprocess and save config
     cfg = _preprocess_cfg(cfg)
 
+    teacher = instantiate(cfg.teacher)
+    # Use context_length if available (accounts for stride), otherwise fall back to sum
+    prefix_length = getattr(teacher, 'context_length', sum(teacher.span_lengths))
+
+    # PE config depends on the teacher's surface-space span structure, so it must
+    # run after instantiation.
+    _configure_positional_encoding(cfg, teacher)
+
     with open("config.yaml", "w") as f:
         OmegaConf.save(cfg, f)
 
@@ -197,10 +204,6 @@ def get_trainer(cfg: DictConfig) -> Trainer:
         )
     else:
         writer = None
-
-    teacher = instantiate(cfg.teacher)
-    # Use context_length if available (accounts for stride), otherwise fall back to sum
-    prefix_length = getattr(teacher, 'context_length', sum(teacher.span_lengths))
 
     if "teacher_readout" in cfg.student and cfg.student.teacher_readout:
         window = teacher.window
@@ -266,9 +269,6 @@ def get_trainer(cfg: DictConfig) -> Trainer:
             logger.info(
                 f"Operator norm/norm^2: {torch.linalg.norm(params, ord=2)}, {torch.linalg.norm(params, ord=2) ** 2}"
             )
-
-    if isinstance(train_loader.dataset, HierarchicalGaussianARClassification):
-        teacher = None
 
     return instantiate(
         cfg.trainer,

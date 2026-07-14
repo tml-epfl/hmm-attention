@@ -1,0 +1,9 @@
+defaults:
+  - linear@base_teacher
+  - _self_
+
+_target_: src.model.HierarchicalTeacher
+chunk_dim: -1
+chunk_size: 2
+temperature: 1.0
+chunk_seed: null

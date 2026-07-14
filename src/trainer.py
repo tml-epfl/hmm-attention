@@ -19,6 +19,8 @@ from src.metrics import (
     RelativeMetric,
 )
 from src.model import (
+    ARModel,
+    HierarchicalTeacher,
     LinearARModel,
     TransformerDecoder,
 )
@@ -117,7 +119,7 @@ class Trainer(ABC):
         self._init_loop()
 
         # dry run to check for errors and to initialize metrics
-        if isinstance(self.teacher, LinearARModel):
+        if isinstance(self.teacher, ARModel):
             self._dry_loop()  # TODO: adapt for TransformerDecoder
 
         # train loop
@@ -147,12 +149,12 @@ class Trainer(ABC):
         return_attn_weights: bool = False,
         prefix: int = -1,
     ) -> torch.Tensor:
-        assert not normalize or isinstance(model, LinearARModel), (
+        assert not normalize or isinstance(model, ARModel), (
             "Normalization is only supported for ARModels"
         )
 
-        if isinstance(model, LinearARModel):
-            kwargs = {"prefix": prefix} if isinstance(model, LinearARModel) else {}
+        if isinstance(model, ARModel):
+            kwargs = {"prefix": prefix}
             if sum(self.teacher.span_lengths) != sum(model.span_lengths):
                 data = data[
                     :, sum(self.teacher.span_lengths) - sum(model.span_lengths) :, :
@@ -164,13 +166,21 @@ class Trainer(ABC):
                 **kwargs,
             )
             if normalize:
-                out_logits = out / self.train_loader.dataset.temperature
-                if self.train_loader.dataset.softmax:
-                    out = F.softmax(out_logits, dim=-1)
+                if isinstance(model, HierarchicalTeacher):
+                    # Wrapper already applied temperature internally and returns
+                    # log(surface_probs). Softmax(log p) = p (sums to 1), so exp
+                    # recovers probs; out_logits stays as log-probs so downstream
+                    # CE/KL losses (which internally log_softmax) remain correct.
+                    out_logits = out
+                    out = out.exp()
                 else:
-                    out = out_logits / torch.linalg.norm(
-                        out_logits, ord=1, dim=-1, keepdim=True
-                    )
+                    out_logits = out / self.train_loader.dataset.temperature
+                    if self.train_loader.dataset.softmax:
+                        out = F.softmax(out_logits, dim=-1)
+                    else:
+                        out = out_logits / torch.linalg.norm(
+                            out_logits, ord=1, dim=-1, keepdim=True
+                        )
         elif isinstance(model, TransformerDecoder):
             out, attn_weights = model(data[:, :-1, :])
             target = data[:, 1:, :]
@@ -214,7 +224,7 @@ class Trainer(ABC):
         for data in self.train_loader:
             data = data.to(self.device)
             # Full teacher (prefix: -1)
-            kwargs = {"prefix": -1} if isinstance(self.teacher, LinearARModel) else {}
+            kwargs = {"prefix": -1} if isinstance(self.teacher, ARModel) else {}
             _, out_logits, target = self._run_ar_model(
                 self.teacher,
                 data,
@@ -290,7 +300,7 @@ class Trainer(ABC):
             "grad_norm": LossMetric(),
         }
 
-        if isinstance(self.teacher, LinearARModel):
+        if isinstance(self.teacher, ARModel):
             teacher_loss_metrics = [
                 "teacher_train_loss",
                 "teacher_val_loss",
@@ -362,7 +372,7 @@ class Trainer(ABC):
                 # ----------------------------------------------------------------------
                 # student forward pass already computed: `out`
                 # ----------------------------------------------------------------------
-                if isinstance(self.teacher, LinearARModel):
+                if isinstance(self.teacher, ARModel):
                     kl_divergence = KLDivergenceLoss(reduction="mean")
                     out_teacher = self._run_ar_model(
                         self.teacher, data, normalize=True, prefix=-1
@@ -542,7 +552,7 @@ class Trainer(ABC):
             s += f"| Train loss: {self.train_loss.compute():.3f} "
             if isinstance(self.loss_fn, CrossentropyLoss):
                 s += f"| Train acc: {self.train_acc.compute():.3f} "
-                if isinstance(self.teacher, LinearARModel):
+                if isinstance(self.teacher, ARModel):
                     s += f"| Train teacher acc: {self.teacher_train_acc.compute():.3f} "
             # if self.val_loader is not None:
             #     s += f"| Val loss: {self.val_loss.compute():.4f} "
@@ -626,7 +636,7 @@ class SGDTrainer(Trainer):
             # update learning scheduler
             self._update_lr_sched(self.lr_metric.compute(), epoch_end=False)
 
-            if isinstance(self.teacher, LinearARModel):
+            if isinstance(self.teacher, ARModel):
                 kl_divergence = KLDivergenceLoss(reduction="mean")
 
                 out_teacher = self._run_ar_model(

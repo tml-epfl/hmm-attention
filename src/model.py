@@ -314,7 +314,285 @@ class VectorARModel(LinearARModel):
 
     def _get_weights(self):
         return self._params
-1
+
+
+# === Hierarchical wrapper ===
+class HierarchicalTeacher(ARModel):
+    """Wraps a base ARModel teacher and exposes a surface-space interface.
+
+    The base teacher operates over a hidden vocabulary of size `base_teacher.dim`.
+    Each hidden token id is mapped, via a deterministic invertible permutation
+    table, to a length-`chunk_size` sequence of one-hot vectors of dimension
+    `chunk_dim`. This wrapper accepts surface-space tensors, decodes them to
+    hidden tokens (assuming chunk alignment), runs the base teacher, and
+    re-emits per-surface-slot predictions using a marginal-with-compatibility
+    computation that correctly handles mid-chunk positions.
+
+    Temperature is applied to the base teacher's hidden logits inside this
+    wrapper before mixing through the chunk table — callers should not divide
+    the returned tensor by temperature again. Forward returns log(surface_probs).
+    """
+
+    def __init__(
+        self,
+        base_teacher: ARModel,
+        chunk_dim: int,
+        chunk_size: int,
+        temperature: float = 1.0,
+        chunk_seed: Optional[int] = None,
+        chunk_table: Optional[torch.Tensor] = None,
+    ) -> None:
+        super().__init__()
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be a positive integer.")
+        if chunk_size > chunk_dim:
+            raise ValueError("chunk_size cannot exceed chunk_dim.")
+
+        self.base_teacher = base_teacher
+        self.chunk_dim = chunk_dim
+        self.chunk_size = chunk_size
+        self.temperature = temperature
+        self.dim = chunk_dim  # external (surface) vocab
+
+        if chunk_table is None:
+            generator = None
+            if chunk_seed is not None:
+                generator = torch.Generator().manual_seed(int(chunk_seed))
+            chunk_table = self._generate_unique_chunks(generator=generator)
+        else:
+            expected = (self.hidden_dim, chunk_size, chunk_dim)
+            if tuple(chunk_table.shape) != expected:
+                raise ValueError(
+                    f"chunk_table shape {tuple(chunk_table.shape)} != expected {expected}"
+                )
+
+        self.register_buffer("_chunk_table", chunk_table)
+        self.register_buffer("_chunk_slot_indices", chunk_table.argmax(dim=-1))
+
+    @property
+    def hidden_dim(self) -> int:
+        return self.base_teacher.dim
+
+    @property
+    def window(self) -> int:
+        return self.base_teacher.window
+
+    @property
+    def span_lengths(self) -> list:
+        return [s * self.chunk_size for s in self.base_teacher.span_lengths]
+
+    @property
+    def context_length(self) -> int:
+        base_ctx = getattr(
+            self.base_teacher,
+            "context_length",
+            sum(self.base_teacher.span_lengths),
+        )
+        return base_ctx * self.chunk_size
+
+    @property
+    def stride(self) -> Optional[int]:
+        base_stride = getattr(self.base_teacher, "stride", None)
+        return base_stride * self.chunk_size if base_stride is not None else None
+
+    def _get_weights(self):
+        return self.base_teacher._get_weights()
+
+    def _run_ar_model(self, x, weights):
+        raise NotImplementedError(
+            "HierarchicalTeacher overrides forward directly; _run_ar_model is unused."
+        )
+
+    def _generate_unique_chunks(
+        self, generator: Optional[torch.Generator] = None
+    ) -> torch.Tensor:
+        total_permutations = math.perm(self.chunk_dim, self.chunk_size)
+        if total_permutations < self.hidden_dim:
+            raise ValueError(
+                "Not enough unique chunk permutations to cover all hidden tokens. "
+                f"Need {self.hidden_dim}, but only {total_permutations} available."
+            )
+
+        chunks = torch.zeros(self.hidden_dim, self.chunk_size, self.chunk_dim)
+        used: set = set()
+        for hid in range(self.hidden_dim):
+            for _ in range(1000):
+                indices = torch.randperm(self.chunk_dim, generator=generator)[
+                    : self.chunk_size
+                ]
+                signature = tuple(indices.tolist())
+                if signature not in used:
+                    used.add(signature)
+                    chunk = torch.zeros(self.chunk_size, self.chunk_dim)
+                    chunk[torch.arange(self.chunk_size), indices] = 1.0
+                    chunks[hid] = chunk
+                    break
+            else:
+                raise RuntimeError(
+                    "Failed to sample a unique chunk sequence after many attempts."
+                )
+        return chunks
+
+    def _decode_chunk_aligned(self, surface: torch.Tensor) -> torch.Tensor:
+        """Decode a chunk-aligned surface tensor to hidden one-hots.
+
+        surface: (..., L_h * chunk_size, chunk_dim). Returns (..., L_h, hidden_dim).
+        """
+        *lead, l_surf, cd = surface.shape
+        if cd != self.chunk_dim:
+            raise ValueError(f"Trailing dim {cd} != chunk_dim {self.chunk_dim}")
+        if l_surf % self.chunk_size != 0:
+            raise ValueError(
+                f"Surface length {l_surf} is not chunk-aligned (chunk_size={self.chunk_size})"
+            )
+        l_h = l_surf // self.chunk_size
+        chunks = surface.reshape(*lead, l_h, self.chunk_size, self.chunk_dim)
+        slot_idx = chunks.argmax(dim=-1)  # (..., L_h, chunk_size)
+        matches = (slot_idx.unsqueeze(-2) == self._chunk_slot_indices).all(dim=-1)
+        hidden_ids = matches.float().argmax(dim=-1)  # (..., L_h)
+        return F.one_hot(hidden_ids, num_classes=self.hidden_dim).to(surface.dtype)
+
+    def _compat_mask(
+        self, observed_slots: torch.Tensor, num_observed: int
+    ) -> torch.Tensor:
+        """Compatibility mask over hidden ids given the leading `num_observed` slots."""
+        if num_observed == 0:
+            lead_shape = observed_slots.shape[:-1]
+            return torch.ones(
+                (*lead_shape, self.hidden_dim),
+                device=observed_slots.device,
+                dtype=torch.float,
+            )
+        obs = observed_slots[..., :num_observed]
+        table = self._chunk_slot_indices[:, :num_observed]
+        matches = (obs.unsqueeze(-2) == table).all(dim=-1)
+        return matches.to(torch.float)
+
+    def _hidden_probs_to_surface_logprobs(
+        self,
+        hidden_logits: torch.Tensor,
+        observed_slots: torch.Tensor,
+        num_observed: int,
+        slot_to_predict: int,
+    ) -> torch.Tensor:
+        """Given base-teacher hidden logits, produce surface log-probs at `slot_to_predict`.
+
+        Softmaxes hidden logits with temperature, filters by compatibility with
+        the observed leading slots of the current chunk, renormalizes, then
+        mixes through the chunk table's target-slot column.
+        """
+        p = F.softmax(hidden_logits / self.temperature, dim=-1)
+        compat = self._compat_mask(observed_slots, num_observed)
+        p_posterior = p * compat
+        norm = p_posterior.sum(dim=-1, keepdim=True).clamp(min=1e-30)
+        p_posterior = p_posterior / norm
+        slot_table = self._chunk_table[:, slot_to_predict, :]  # (hidden_dim, chunk_dim)
+        surface_probs = p_posterior @ slot_table
+        return surface_probs.clamp(min=1e-30).log()
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        unroll_sequences: bool = True,
+        return_targets: bool = False,
+        prefix: int = -1,
+    ) -> torch.Tensor:
+        if unroll_sequences:
+            return self._forward_unrolled(
+                tokens, return_targets=return_targets, prefix=prefix
+            )
+        return self._forward_autoregressive(tokens, prefix=prefix)
+
+    def _forward_unrolled(
+        self, tokens: torch.Tensor, return_targets: bool, prefix: int
+    ):
+        """Training/eval path. tokens shape (B, L_surf, chunk_dim), chunk-aligned."""
+        B, L_surf, _ = tokens.shape
+        if L_surf % self.chunk_size != 0:
+            raise ValueError(
+                f"Unrolled forward requires chunk-aligned length; got {L_surf}"
+            )
+        L_h = L_surf // self.chunk_size
+
+        hidden = self._decode_chunk_aligned(tokens)  # (B, L_h, hidden_dim)
+
+        hidden_logits, _ = self.base_teacher(
+            hidden,
+            unroll_sequences=True,
+            return_targets=True,
+            prefix=prefix,
+        )  # (B, L_h - ctx_h, hidden_dim)
+
+        L_out_h = hidden_logits.shape[1]
+        ctx_surf = L_surf - L_out_h * self.chunk_size
+        pred_surface = tokens[:, ctx_surf:, :].reshape(
+            B, L_out_h, self.chunk_size, self.chunk_dim
+        )
+        pred_slot_idx = pred_surface.argmax(dim=-1)  # (B, L_out_h, chunk_size)
+
+        slot_logprobs = []
+        for s in range(self.chunk_size):
+            lp = self._hidden_probs_to_surface_logprobs(
+                hidden_logits=hidden_logits,
+                observed_slots=pred_slot_idx,
+                num_observed=s,
+                slot_to_predict=s,
+            )
+            slot_logprobs.append(lp)
+        stacked = torch.stack(slot_logprobs, dim=2)  # (B, L_out_h, chunk_size, chunk_dim)
+        surface_logprobs = stacked.reshape(B, L_out_h * self.chunk_size, self.chunk_dim)
+
+        if return_targets:
+            targets = tokens[:, ctx_surf:, :]
+            return surface_logprobs, targets
+        return surface_logprobs
+
+    def _forward_autoregressive(
+        self, tokens: torch.Tensor, prefix: int
+    ) -> torch.Tensor:
+        """Generation path: predict only the next surface token given the prefix.
+
+        Called by ARRegression._generate_seq via _autoregressive_model. tokens
+        may be (T, chunk_dim) or (1, T, chunk_dim); returns matching (chunk_dim,)
+        or (1, chunk_dim) — mirroring LinearARModel's contract in that context.
+        """
+        squeeze_batch = tokens.ndim == 2
+        if squeeze_batch:
+            tokens = tokens.unsqueeze(0)
+
+        B, T, _ = tokens.shape
+        if B != 1:
+            raise ValueError(
+                "Autoregressive path expects a single sequence in the batch dim."
+            )
+
+        s = T % self.chunk_size
+        complete_surf = T - s
+        complete_hidden = self._decode_chunk_aligned(tokens[:, :complete_surf, :])
+
+        hidden_pred = self.base_teacher(
+            complete_hidden,
+            unroll_sequences=False,
+            return_targets=False,
+            prefix=prefix,
+        )
+        if hidden_pred.ndim == 1:
+            hidden_pred = hidden_pred.unsqueeze(0)
+
+        observed = torch.zeros(
+            1, self.chunk_size, dtype=torch.long, device=tokens.device
+        )
+        if s > 0:
+            observed[:, :s] = tokens[:, complete_surf:, :].argmax(dim=-1)
+
+        log_surface = self._hidden_probs_to_surface_logprobs(
+            hidden_logits=hidden_pred,
+            observed_slots=observed,
+            num_observed=s,
+            slot_to_predict=s,
+        )
+        return log_surface.squeeze(0) if squeeze_batch else log_surface
+
 
 # === Transformer ===
 def generate_square_subsequent_mask(sz, device):

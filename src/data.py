@@ -5,7 +5,7 @@ import torch, torch.nn.functional as F
 from torch.utils.data import Dataset
 
 
-from src.model import LinearARModel, TransformerDecoder
+from src.model import ARModel, LinearARModel, TransformerDecoder
 from src.utils import split_into_windows
 
 
@@ -66,8 +66,8 @@ class ARRegression(Dataset, ABC):
         with torch.no_grad():
             device = next(self.teacher.parameters()).device
 
-            # Linear AR Teacher
-            if isinstance(self.teacher, LinearARModel):
+            # AR Teacher (LinearARModel, HierarchicalTeacher, etc.)
+            if isinstance(self.teacher, ARModel):
                 y = self.teacher.forward(prefix.to(device), unroll_sequences=False)
                 return y.to(prefix.device)  # shape (D,)
 
@@ -204,128 +204,6 @@ class ARClassification(ARRegression, ABC):
         )
 
 
-class HierarchicalARClassification(ARClassification):
-    def __init__(
-        self,
-        teacher: torch.nn.Module,
-        window: int,
-        dim: int,
-        chunk_dim: int,
-        chunk_size: int,
-        number: int,
-        length: int,
-        prefix_length: int,
-        softmax: bool = True,
-        temperature: float = 1.0,
-        one_hot: bool = True,
-        unroll_sequences: bool = True,
-        random_sampling: bool = False,
-        use_full_prefix: bool = False,
-        replicate_context_for_spans: bool = True,
-        stochastic_emission: bool = False,
-    ) -> None:
-        if chunk_size <= 0:
-            raise ValueError("chunk_size must be a positive integer.")
-        if chunk_size > chunk_dim:
-            raise ValueError(
-                "chunk_size cannot exceed chunk_dim when emitting unique one-hot chunks."
-            )
-        if not one_hot:
-            raise ValueError("Hierarchical autoregressive data requires one_hot=True.")
-
-        super().__init__(
-            teacher=teacher,
-            window=window,
-            dim=dim,
-            number=number,
-            length=length,
-            prefix_length=prefix_length,
-            softmax=softmax,
-            temperature=temperature,
-            one_hot=one_hot,
-            unroll_sequences=unroll_sequences,
-            random_sampling=random_sampling,
-            use_full_prefix=use_full_prefix,
-            replicate_context_for_spans=replicate_context_for_spans,
-        )
-
-        self.chunk_dim = chunk_dim
-        self.chunk_size = chunk_size
-        self.stochastic_emission = stochastic_emission
-        self._chunks = self._generate_unique_chunks()
-
-    def __getitem__(self, index: int) -> torch.Tensor:
-        item = super().__getitem__(index)
-
-        if isinstance(item, tuple):
-            xs, ys = item
-            return self._replace_with_chunks(xs), self._replace_with_chunks(ys)
-
-        return self._replace_with_chunks(item)
-
-    def _replace_with_chunks(self, tensor: torch.Tensor) -> torch.Tensor:
-        if tensor.ndim == 0:
-            raise ValueError("Input tensor must have at least one dimension.")
-
-        original_device = tensor.device
-        flattened = tensor.reshape(-1, tensor.shape[-1])
-        if not torch.allclose(
-            flattened.sum(dim=-1), torch.ones(flattened.size(0), device=flattened.device)
-        ):
-            raise ValueError("Hierarchical replacement expects one-hot encoded tokens.")
-
-        token_ids = torch.argmax(flattened, dim=-1)
-
-        vocab_per_h = self._chunks.to(original_device)[token_ids]
-        if self.stochastic_emission:
-            slots = torch.randint(
-                0, self.chunk_size, vocab_per_h.shape[:2], device=original_device
-            )
-            chunks = vocab_per_h.gather(
-                1, slots.unsqueeze(-1).expand(-1, -1, self.chunk_dim)
-            )
-        else:
-            chunks = vocab_per_h
-        prefix_shape = tensor.shape[:-1]
-        chunks = chunks.view(*prefix_shape, self.chunk_size, self.chunk_dim)
-
-        if prefix_shape:
-            new_seq_len = prefix_shape[-1] * self.chunk_size
-            return chunks.reshape(*prefix_shape[:-1], new_seq_len, self.chunk_dim)
-
-        return chunks.reshape(self.chunk_size, self.chunk_dim)
-
-    def _generate_unique_chunks(self) -> torch.Tensor:
-        """Map each base one-hot vector to a unique sequence of one-hot chunks."""
-        total_permutations = math.perm(self.chunk_dim, self.chunk_size)
-        if total_permutations < self.dim:
-            raise ValueError(
-                "Not enough unique chunk permutations to cover all base tokens. "
-                f"Need {self.dim}, but only {total_permutations} available."
-            )
-
-        chunks = torch.zeros(self.dim, self.chunk_size, self.chunk_dim)
-        used_sequences = set()
-        for token_idx in range(self.dim):
-            attempts = 0
-            while True:
-                indices = torch.randperm(self.chunk_dim)[: self.chunk_size]
-                sequence_signature = tuple(indices.tolist())
-                if sequence_signature not in used_sequences:
-                    used_sequences.add(sequence_signature)
-                    chunk = torch.zeros(self.chunk_size, self.chunk_dim)
-                    chunk[torch.arange(self.chunk_size), indices] = 1.0
-                    chunks[token_idx] = chunk
-                    break
-
-                attempts += 1
-                if attempts > 1000:
-                    raise RuntimeError(
-                        "Failed to sample a unique chunk sequence after many attempts."
-                    )
-
-        return chunks
-
 class GaussianARRegression(ARRegression):
     def __init__(
         self,
@@ -416,52 +294,3 @@ class GaussianARClassification(ARClassification, GaussianARRegression):
             replicate_context_for_spans=replicate_context_for_spans,
         )
 
-class HierarchicalGaussianARClassification(
-    HierarchicalARClassification, GaussianARRegression
-):
-    def __init__(
-        self,
-        teacher: torch.nn.Module,
-        window: int,
-        dim: int,
-        chunk_dim: int,
-        chunk_size: int,
-        number: int,
-        length: int,
-        prefix_length: int,
-        sigma_err: float = 0.0,
-        sigma_data: float = 0.0,
-        softmax: bool = True,
-        temperature: float = 1.0,
-        one_hot: bool = True,
-        unroll_sequences: bool = True,
-        random_sampling: bool = False,
-        use_full_prefix: bool = False,
-        replicate_context_for_spans: bool = True,
-        stochastic_emission: bool = False,
-    ) -> None:
-        """Hierarchical autoregressive dataset with Gaussian noise on teacher outputs."""
-        if not one_hot:
-            raise ValueError("Hierarchical Gaussian classification requires one_hot=True.")
-
-        self.sigma_err = sigma_err
-        self.sigma_data = sigma_data
-
-        super().__init__(
-            teacher=teacher,
-            window=window,
-            dim=dim,
-            chunk_dim=chunk_dim,
-            chunk_size=chunk_size,
-            number=number,
-            length=length,
-            prefix_length=prefix_length,
-            softmax=softmax,
-            temperature=temperature,
-            one_hot=one_hot,
-            unroll_sequences=unroll_sequences,
-            random_sampling=random_sampling,
-            use_full_prefix=use_full_prefix,
-            replicate_context_for_spans=replicate_context_for_spans,
-            stochastic_emission=stochastic_emission,
-        )
