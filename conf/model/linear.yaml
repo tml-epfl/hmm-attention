@@ -1,4 +1,4 @@
-_target_: src.model.VectorARModel.from_parameters
+_target_: src.teachers.LinearARTeacher.from_parameters
 dim: -1
 rank: -1
 window: -1

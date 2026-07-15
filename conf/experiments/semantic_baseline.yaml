@@ -5,5 +5,3 @@ defaults:
 teacher:
   per_head_alpha: 1.9
 
-dataset:
-  use_full_prefix: true

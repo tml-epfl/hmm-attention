@@ -18,12 +18,8 @@ from src.metrics import (
     MinMetric,
     RelativeMetric,
 )
-from src.model import (
-    ARModel,
-    HierarchicalTeacher,
-    LinearARModel,
-    TransformerDecoder,
-)
+from src.model import TransformerDecoder
+from src.teachers import ARTeacher, HierarchicalTeacher, LinearARTeacher
 from src.visualizer import (
     log_attention_alignment,
     log_attention_heatmap,
@@ -119,7 +115,7 @@ class Trainer(ABC):
         self._init_loop()
 
         # dry run to check for errors and to initialize metrics
-        if isinstance(self.teacher, ARModel):
+        if isinstance(self.teacher, ARTeacher):
             self._dry_loop()  # TODO: adapt for TransformerDecoder
 
         # train loop
@@ -149,28 +145,34 @@ class Trainer(ABC):
         return_attn_weights: bool = False,
         prefix: int = -1,
     ) -> torch.Tensor:
-        assert not normalize or isinstance(model, ARModel), (
-            "Normalization is only supported for ARModels"
+        assert not normalize or isinstance(model, ARTeacher), (
+            "Normalization is only supported for ARTeacher models"
         )
 
-        if isinstance(model, ARModel):
-            kwargs = {"prefix": prefix}
-            if sum(self.teacher.span_lengths) != sum(model.span_lengths):
+        if isinstance(model, ARTeacher):
+            # `prefix > 0` in the old API meant "restrict AR weights to first k
+            # lags." The new API exposes this via with_lag_restriction, and we
+            # precompute the restricted variants once at init in _teacher_by_k.
+            # For prefix == self.teacher.window, restriction is a no-op; fall
+            # through to the unrestricted `model` (typically self.teacher).
+            if prefix > 0 and prefix in self._teacher_by_k:
+                model = self._teacher_by_k[prefix]
+            # Align data length: teacher-generated data has context_length_teacher
+            # leading prefix tokens; a lag-restricted model sees a shorter context,
+            # so trim data from the front so both produce the same # of output positions.
+            if self.teacher.context_length != model.context_length:
                 data = data[
-                    :, sum(self.teacher.span_lengths) - sum(model.span_lengths) :, :
+                    :, self.teacher.context_length - model.context_length :, :
                 ]
 
-            out, target = model(
-                data,
-                return_targets=True,
-                **kwargs,
-            )
+            out, target = model.unroll(data, return_targets=True)
             if normalize:
                 if isinstance(model, HierarchicalTeacher):
                     # Wrapper already applied temperature internally and returns
-                    # log(surface_probs). Softmax(log p) = p (sums to 1), so exp
-                    # recovers probs; out_logits stays as log-probs so downstream
-                    # CE/KL losses (which internally log_softmax) remain correct.
+                    # log(surface_probs). exp() recovers probs; out_logits stays
+                    # as log-probs so downstream CE/KL losses (which internally
+                    # log_softmax) remain correct — log_softmax(log p) = log p
+                    # when p sums to 1.
                     out_logits = out
                     out = out.exp()
                 else:
@@ -224,7 +226,7 @@ class Trainer(ABC):
         for data in self.train_loader:
             data = data.to(self.device)
             # Full teacher (prefix: -1)
-            kwargs = {"prefix": -1} if isinstance(self.teacher, ARModel) else {}
+            kwargs = {"prefix": -1} if isinstance(self.teacher, ARTeacher) else {}
             _, out_logits, target = self._run_ar_model(
                 self.teacher,
                 data,
@@ -279,6 +281,16 @@ class Trainer(ABC):
         for m in self.ngram_models.values():
             m.to(self.device)
 
+        # Precompute lag-restricted teacher variants once, so val/train loops
+        # don't rebuild them on every step. Key = k (1..window-1); k == window
+        # is equivalent to self.teacher, so skip it to avoid a redundant params clone.
+        self._teacher_by_k = {}
+        if isinstance(self.teacher, ARTeacher):
+            for k in range(1, self.teacher.window):
+                self._teacher_by_k[k] = self.teacher.with_lag_restriction(k).to(
+                    self.device
+                )
+
         self.history = {
             "train_loss": [],
             "train_true_loss": [],
@@ -300,7 +312,7 @@ class Trainer(ABC):
             "grad_norm": LossMetric(),
         }
 
-        if isinstance(self.teacher, ARModel):
+        if isinstance(self.teacher, ARTeacher):
             teacher_loss_metrics = [
                 "teacher_train_loss",
                 "teacher_val_loss",
@@ -372,7 +384,7 @@ class Trainer(ABC):
                 # ----------------------------------------------------------------------
                 # student forward pass already computed: `out`
                 # ----------------------------------------------------------------------
-                if isinstance(self.teacher, ARModel):
+                if isinstance(self.teacher, ARTeacher):
                     kl_divergence = KLDivergenceLoss(reduction="mean")
                     out_teacher = self._run_ar_model(
                         self.teacher, data, normalize=True, prefix=-1
@@ -457,7 +469,7 @@ class Trainer(ABC):
                 )
 
                 # Alignment: value matrix and attention pattern vs. ground truth
-                if isinstance(self.teacher, LinearARModel):
+                if isinstance(self.teacher, LinearARTeacher):
                     _stride = getattr(self.teacher, "stride", None)
                     _ctx_len = getattr(
                         self.teacher, "context_length", sum(self.teacher.span_lengths)
@@ -552,7 +564,7 @@ class Trainer(ABC):
             s += f"| Train loss: {self.train_loss.compute():.3f} "
             if isinstance(self.loss_fn, CrossentropyLoss):
                 s += f"| Train acc: {self.train_acc.compute():.3f} "
-                if isinstance(self.teacher, ARModel):
+                if isinstance(self.teacher, ARTeacher):
                     s += f"| Train teacher acc: {self.teacher_train_acc.compute():.3f} "
             # if self.val_loader is not None:
             #     s += f"| Val loss: {self.val_loss.compute():.4f} "
@@ -636,7 +648,7 @@ class SGDTrainer(Trainer):
             # update learning scheduler
             self._update_lr_sched(self.lr_metric.compute(), epoch_end=False)
 
-            if isinstance(self.teacher, ARModel):
+            if isinstance(self.teacher, ARTeacher):
                 kl_divergence = KLDivergenceLoss(reduction="mean")
 
                 out_teacher = self._run_ar_model(
@@ -738,7 +750,7 @@ class SGDTrainer(Trainer):
                     )
 
                     # Alignment: value matrix and attention pattern vs. ground truth
-                    if isinstance(self.teacher, LinearARModel):
+                    if isinstance(self.teacher, LinearARTeacher):
                         _stride = getattr(self.teacher, "stride", None)
                         _ctx_len = getattr(
                             self.teacher, "context_length", sum(self.teacher.span_lengths)

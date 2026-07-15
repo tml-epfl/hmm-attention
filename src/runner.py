@@ -8,7 +8,7 @@ import torch, wandb, copy
 from torch.utils.data import DataLoader, RandomSampler
 
 from src.trainer import Trainer
-from src.model import LinearARModel
+from src.teachers import LinearARTeacher
 
 def _pass_sched_metric(
     scheduler: torch.optim.lr_scheduler._LRScheduler,
@@ -234,7 +234,7 @@ def get_trainer(cfg: DictConfig) -> Trainer:
     }
 
     if cfg.misc.verbose:
-        if isinstance(teacher, LinearARModel):
+        if isinstance(teacher, LinearARTeacher):
             logger = logging.getLogger()
             logger.info(f"===== Teacher =====")
             logger.info(f"Teacher rank: {teacher.rank}")
@@ -252,7 +252,7 @@ def get_trainer(cfg: DictConfig) -> Trainer:
                 f"Operator norm/norm^2: {torch.linalg.norm(params, ord=2)}, {torch.linalg.norm(params, ord=2) ** 2}"
             )
 
-        if isinstance(student, LinearARModel):
+        if isinstance(student, LinearARTeacher):
             logger = logging.getLogger()
             logger.info(f"===== Student =====")
             logger.info(f"Student rank: {student.rank}")

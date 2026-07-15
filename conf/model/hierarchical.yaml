@@ -2,7 +2,7 @@ defaults:
   - linear@base_teacher
   - _self_
 
-_target_: src.model.HierarchicalTeacher
+_target_: src.teachers.HierarchicalTeacher
 chunk_dim: -1
 chunk_size: 2
 temperature: 1.0

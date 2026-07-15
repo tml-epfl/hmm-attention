@@ -5,7 +5,8 @@ import torch, torch.nn.functional as F
 from torch.utils.data import Dataset
 
 
-from src.model import ARModel, LinearARModel, TransformerDecoder
+from src.model import TransformerDecoder
+from src.teachers import ARTeacher
 from src.utils import split_into_windows
 
 
@@ -20,7 +21,6 @@ class ARRegression(Dataset, ABC):
         prefix_length: int,
         unroll_sequences: bool = True,
         random_sampling: bool = False,
-        use_full_prefix: bool = False,
         replicate_context_for_spans: bool = True,
     ) -> None:
         if prefix_length == -1:
@@ -38,7 +38,6 @@ class ARRegression(Dataset, ABC):
         self.unroll_sequences = unroll_sequences
         self.refresh_sequences = number < 0
         self.random_sampling = random_sampling
-        self.use_full_prefix = use_full_prefix
         self.replicate_context_for_spans = replicate_context_for_spans
         self.prefix_length = prefix_length
         self.data = self._generate(self.number, self.length)
@@ -60,18 +59,16 @@ class ARRegression(Dataset, ABC):
     def _autoregressive_model(self, prefix: torch.Tensor) -> torch.Tensor:
         """
         Returns the teacher's prediction for the *next* token given `prefix`.
-        - Linear AR teachers return a single (D,) vector directly.
-        - TransformerDecoder returns (B, L, D) over the whole prefix; we take the last step.
+        - ARTeacher.predict_next auto-slices to context_length and returns (B, D).
+        - TransformerDecoder returns (B, L, D) over the whole prefix; we take last step.
         """
         with torch.no_grad():
             device = next(self.teacher.parameters()).device
 
-            # AR Teacher (LinearARModel, HierarchicalTeacher, etc.)
-            if isinstance(self.teacher, ARModel):
-                y = self.teacher.forward(prefix.to(device), unroll_sequences=False)
-                return y.to(prefix.device)  # shape (D,)
+            if isinstance(self.teacher, ARTeacher):
+                y = self.teacher.predict_next(prefix.to(device))
+                return y.to(prefix.device)  # (B, D)
 
-            # Transformer Teacher: feed the prefix as a batch of size 1, take last step
             if isinstance(self.teacher, TransformerDecoder):
                 x = prefix.unsqueeze(0).to(device)  # (1, K, D)
                 out = self.teacher(x)
@@ -104,12 +101,11 @@ class ARRegression(Dataset, ABC):
                 seq[i, :] = self._sampling_model(seq[i, :])
 
         # Generate the rest of the sequence seeded by the prefix.
+        # Always pass the full growing prefix; each teacher handles its own
+        # context-slicing (ARTeacher.predict_next auto-slices to context_length,
+        # TransformerDecoder uses causal attention over the whole input).
         for i in range(self.prefix_length, seq.shape[0]):
-            if self.use_full_prefix:
-                prefix = seq[:i, :]
-            else:
-                prefix = seq[max(0, i - self.prefix_length) : i, :]
-            # Generate next token using teacher prediction + error (error is set to zero.)
+            prefix = seq[:i, :]
             seq[i, :] = self._sampling_model(
                 self._autoregressive_model(prefix.unsqueeze(0))  # batch dim = 1
                 + self._error_model(prefix)
@@ -148,7 +144,6 @@ class ARClassification(ARRegression, ABC):
         one_hot: bool = False,
         unroll_sequences: bool = True,
         random_sampling: bool = False,
-        use_full_prefix: bool = False,
         replicate_context_for_spans: bool = True,
         prefix_length: int = None,
     ) -> None:
@@ -166,7 +161,6 @@ class ARClassification(ARRegression, ABC):
             prefix_length=prefix_length,
             unroll_sequences=unroll_sequences,
             random_sampling=random_sampling,
-            use_full_prefix=use_full_prefix,
             replicate_context_for_spans=replicate_context_for_spans,
         )
 
@@ -216,7 +210,6 @@ class GaussianARRegression(ARRegression):
         sigma_data: float = 0.0,
         unroll_sequences: bool = True,
         random_sampling: bool = False,
-        use_full_prefix: bool = False,
         replicate_context_for_spans: bool = True,
         prefix_length: int = None,
     ) -> None:
@@ -232,7 +225,6 @@ class GaussianARRegression(ARRegression):
             prefix_length=prefix_length,
             unroll_sequences=unroll_sequences,
             random_sampling=random_sampling,
-            use_full_prefix=use_full_prefix,
             replicate_context_for_spans=replicate_context_for_spans,
         )
 
@@ -266,7 +258,6 @@ class GaussianARClassification(ARClassification, GaussianARRegression):
         one_hot: bool = False,
         unroll_sequences: bool = True,
         random_sampling: bool = False,
-        use_full_prefix: bool = False,
         replicate_context_for_spans: bool = True,
         prefix_length: int = None,
     ) -> None:
@@ -276,7 +267,6 @@ class GaussianARClassification(ARClassification, GaussianARRegression):
         self.temperature = temperature
         self.one_hot = one_hot
         self.random_sampling = random_sampling
-        self.use_full_prefix = use_full_prefix
 
         GaussianARRegression.__init__(
             self,
@@ -290,7 +280,6 @@ class GaussianARClassification(ARClassification, GaussianARRegression):
             sigma_data=sigma_data,
             unroll_sequences=unroll_sequences,
             random_sampling=random_sampling,
-            use_full_prefix=use_full_prefix,
             replicate_context_for_spans=replicate_context_for_spans,
         )
 
