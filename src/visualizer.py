@@ -214,7 +214,7 @@ def compute_gt_attention_row(
         span_lengths: per-head span lengths (list of ints, length == num_heads)
         context_length: total context window length (sum of spans or stride-based)
         seq_len: length of the trimmed attention axis (the `length` dimension
-                 after prefix trimming in _run_ar_model)
+                 after prefix trimming in Trainer._run_student)
         stride: stride between spans; None means non-overlapping
 
     Returns:
