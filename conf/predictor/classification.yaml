@@ -1,0 +1,2 @@
+kind: classification
+argmax: false          # deterministic argmax sampling (equivalent to T=0)

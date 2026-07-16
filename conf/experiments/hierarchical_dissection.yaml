@@ -9,20 +9,18 @@ defaults:
 teacher:
   chunk_dim: 64
   chunk_size: 2
-  temperature: 0.1                 # matches dataset.temperature
   base_teacher:
     dim: 64                        # hidden vocab
     rank: 64
     window: 3
     span_lengths: [1, 1, 1]        # in hidden space
     multiplicative_constant: 1.7
+    scale: 10                      # sharpness (formerly `temperature: 0.1`)
 
 dataset:
   window: 3
   dim: 64                          # surface vocab (= chunk_dim)
   length: 40                       # 20 hidden * chunk_size(2) surface tokens
-  temperature: 0.1
-  replicate_context_for_spans: false
 
 student:
   dim: 64                          # = chunk_dim

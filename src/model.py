@@ -453,6 +453,17 @@ class TransformerDecoder(nn.Module):
         output = self.decoder(x)
         return output, attention_weights
 
+    def predict_next(self, prefix: torch.Tensor) -> torch.Tensor:
+        """Return next-token log-probs from the last position of the causal attention.
+
+        prefix: (B, T, dim). Returns (B, dim) log-probs. Kept as a duck-typed
+        method rather than participating in the ARTeacher hierarchy — the
+        Predictor layer uses it. Matches the log-prob output convention of
+        `ARTeacher.predict_next` so the predictor is teacher-type-agnostic.
+        """
+        logits, _ = self(prefix)
+        return F.log_softmax(logits[:, -1, :], dim=-1)
+
 
 class MultiHeadAttention(nn.Module):
     def __init__(

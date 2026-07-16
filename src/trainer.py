@@ -19,7 +19,7 @@ from src.metrics import (
     RelativeMetric,
 )
 from src.model import TransformerDecoder
-from src.teachers import ARTeacher, HierarchicalTeacher, LinearARTeacher
+from src.teachers import ARTeacher, LinearARTeacher
 from src.visualizer import (
     log_attention_alignment,
     log_attention_heatmap,
@@ -167,22 +167,11 @@ class Trainer(ABC):
 
             out, target = model.unroll(data, return_targets=True)
             if normalize:
-                if isinstance(model, HierarchicalTeacher):
-                    # Wrapper already applied temperature internally and returns
-                    # log(surface_probs). exp() recovers probs; out_logits stays
-                    # as log-probs so downstream CE/KL losses (which internally
-                    # log_softmax) remain correct — log_softmax(log p) = log p
-                    # when p sums to 1.
-                    out_logits = out
-                    out = out.exp()
-                else:
-                    out_logits = out / self.train_loader.dataset.temperature
-                    if self.train_loader.dataset.softmax:
-                        out = F.softmax(out_logits, dim=-1)
-                    else:
-                        out = out_logits / torch.linalg.norm(
-                            out_logits, ord=1, dim=-1, keepdim=True
-                        )
+                # All teachers return log-probs; exp gives probs. `out_logits`
+                # stays as log-probs — downstream CE/KL both apply `log_softmax`
+                # internally, which is a near-identity on log-probs.
+                out_logits = out
+                out = out.exp()
         elif isinstance(model, TransformerDecoder):
             out, attn_weights = model(data[:, :-1, :])
             target = data[:, 1:, :]

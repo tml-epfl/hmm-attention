@@ -11,6 +11,7 @@ defaults:
   - scheduler: reduce_on_plateu
   - trainer: sgd
   - misc: default
+  - predictor: classification
   - experiments: null
   - override hydra/launcher: ray
 

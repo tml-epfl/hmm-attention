@@ -1,0 +1,2 @@
+kind: regression
+noise_std: 0.0  # additive Gaussian noise on next-token mean

@@ -7,6 +7,7 @@ import logging
 import torch, wandb, copy
 from torch.utils.data import DataLoader, RandomSampler
 
+from src.predictors import build_predictor
 from src.trainer import Trainer
 from src.teachers import LinearARTeacher
 
@@ -124,7 +125,7 @@ def _preprocess_cfg(cfg: DictConfig) -> DictConfig:
 def _get_loaders(
     cfg: DictConfig,
     trainer_cfg: DictConfig,
-    teacher: torch.nn.Module,
+    predictor: torch.nn.Module,
     prefix_length: int,
 ) -> Tuple[DataLoader, DataLoader]:
     # init batch size
@@ -139,13 +140,13 @@ def _get_loaders(
 
     # initialize datasets
     train_dataset = instantiate(
-        cfg, teacher=teacher, number=train_size, prefix_length=prefix_length
+        cfg, predictor=predictor, number=train_size, prefix_length=prefix_length
     )
     validation_dataset = (
         copy.deepcopy(train_dataset)
         if val_size == 0
         else instantiate(
-            cfg, teacher=teacher, number=val_size, prefix_length=prefix_length
+            cfg, predictor=predictor, number=val_size, prefix_length=prefix_length
         )
     )
 
@@ -213,8 +214,13 @@ def get_trainer(cfg: DictConfig) -> Trainer:
         window, teacher_matrices = None, None
         student = instantiate(cfg.student)
 
+    # Build a predictor that wraps the teacher; the dataset never sees the
+    # teacher type. Predictor config carries sampling knobs (e.g. argmax).
+    predictor_cfg = OmegaConf.to_container(cfg.predictor, resolve=True) if "predictor" in cfg else {}
+    predictor = build_predictor(teacher, **predictor_cfg)
+
     train_loader, val_loader = _get_loaders(
-        cfg.dataset, cfg.trainer, teacher=teacher, prefix_length=prefix_length
+        cfg.dataset, cfg.trainer, predictor=predictor, prefix_length=prefix_length
     )
     loss_fn = instantiate(cfg.loss)
     optimizer = _get_optimizer(cfg.optimizer, student)

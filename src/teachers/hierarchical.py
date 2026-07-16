@@ -19,10 +19,10 @@ class HierarchicalTeacher(ARTeacher):
     using a marginal-with-compatibility computation that correctly handles
     mid-chunk positions.
 
-    Temperature is applied to the base teacher's hidden logits inside this wrapper
-    before mixing through the chunk table — callers should not apply another
-    temperature-softmax on top. `next_token_logits`, `predict_next`, and `unroll`
-    all return **log surface probabilities**.
+    Distribution sharpness is encoded in the base teacher's weight scale (see
+    `LinearARTeacher.from_parameters(scale=...)`) — there is no temperature knob
+    here. `next_token_log_probs`, `predict_next`, and `unroll` all return
+    **log surface probabilities**.
     """
 
     def __init__(
@@ -30,7 +30,6 @@ class HierarchicalTeacher(ARTeacher):
         base_teacher: ARTeacher,
         chunk_dim: int,
         chunk_size: int,
-        temperature: float = 1.0,
         chunk_seed: Optional[int] = None,
         chunk_table: Optional[torch.Tensor] = None,
     ) -> None:
@@ -43,7 +42,6 @@ class HierarchicalTeacher(ARTeacher):
         self.base_teacher = base_teacher
         self.chunk_dim = chunk_dim
         self.chunk_size = chunk_size
-        self.temperature = temperature
 
         if chunk_table is None:
             generator = None
@@ -89,7 +87,7 @@ class HierarchicalTeacher(ARTeacher):
     def _get_weights(self) -> torch.Tensor:
         return self.base_teacher._get_weights()
 
-    def next_token_logits(self, context: torch.Tensor) -> torch.Tensor:
+    def next_token_log_probs(self, context: torch.Tensor) -> torch.Tensor:
         """Predict slot 0 of the *next* chunk, given a chunk-aligned context.
 
         context: (B, context_length, chunk_dim). Returns (B, chunk_dim) log-probs.
@@ -99,14 +97,14 @@ class HierarchicalTeacher(ARTeacher):
                 f"context has {context.shape[-2]} tokens; expected {self.context_length}"
             )
         hidden = self._decode_chunk_aligned(context)  # (B, base_ctx_h, hidden_dim)
-        hidden_logits = self.base_teacher.next_token_logits(hidden)  # (B, hidden_dim)
+        hidden_log_probs = self.base_teacher.next_token_log_probs(hidden)  # (B, hidden_dim)
 
-        B = hidden_logits.shape[0]
+        B = hidden_log_probs.shape[0]
         dummy_observed = torch.zeros(
-            B, self.chunk_size, dtype=torch.long, device=hidden_logits.device
+            B, self.chunk_size, dtype=torch.long, device=hidden_log_probs.device
         )
         return self._hidden_probs_to_surface_logprobs(
-            hidden_logits=hidden_logits,
+            hidden_log_probs=hidden_log_probs,
             observed_slots=dummy_observed,
             num_observed=0,
             slot_to_predict=0,
@@ -133,9 +131,9 @@ class HierarchicalTeacher(ARTeacher):
         # First context_length tokens are chunk-aligned.
         context_surface = prefix[..., : self.context_length, :]
         context_hidden = self._decode_chunk_aligned(context_surface)
-        hidden_logits = self.base_teacher.next_token_logits(context_hidden)
+        hidden_log_probs = self.base_teacher.next_token_log_probs(context_hidden)
 
-        B = hidden_logits.shape[0]
+        B = hidden_log_probs.shape[0]
         observed = torch.zeros(
             B, self.chunk_size, dtype=torch.long, device=prefix.device
         )
@@ -144,7 +142,7 @@ class HierarchicalTeacher(ARTeacher):
             observed[:, :s] = partial.argmax(dim=-1)
 
         return self._hidden_probs_to_surface_logprobs(
-            hidden_logits=hidden_logits,
+            hidden_log_probs=hidden_log_probs,
             observed_slots=observed,
             num_observed=s,
             slot_to_predict=s,
@@ -173,8 +171,8 @@ class HierarchicalTeacher(ARTeacher):
         L_h = L_surf // self.chunk_size
 
         hidden = self._decode_chunk_aligned(sequence)  # (B, L_h, hidden_dim)
-        hidden_logits = self.base_teacher.unroll(hidden)  # (B, L_h - base_ctx_h, hidden_dim)
-        L_out_h = hidden_logits.shape[1]
+        hidden_log_probs = self.base_teacher.unroll(hidden)  # (B, L_h - base_ctx_h, hidden_dim)
+        L_out_h = hidden_log_probs.shape[1]
         ctx_surf = self.context_length
 
         # Slot indices of the *predicted* chunks (for mid-chunk conditioning).
@@ -187,7 +185,7 @@ class HierarchicalTeacher(ARTeacher):
         slot_logprobs = []
         for s in range(self.chunk_size):
             lp = self._hidden_probs_to_surface_logprobs(
-                hidden_logits=hidden_logits,
+                hidden_log_probs=hidden_log_probs,
                 observed_slots=pred_slot_idx,
                 num_observed=s,
                 slot_to_predict=s,
@@ -208,7 +206,6 @@ class HierarchicalTeacher(ARTeacher):
             base_teacher=restricted_base,
             chunk_dim=self.chunk_dim,
             chunk_size=self.chunk_size,
-            temperature=self.temperature,
             chunk_table=self._chunk_table,
         )
 
@@ -277,13 +274,13 @@ class HierarchicalTeacher(ARTeacher):
 
     def _hidden_probs_to_surface_logprobs(
         self,
-        hidden_logits: torch.Tensor,
+        hidden_log_probs: torch.Tensor,
         observed_slots: torch.Tensor,
         num_observed: int,
         slot_to_predict: int,
     ) -> torch.Tensor:
-        """Softmax hidden logits with temperature, filter by compat, mix through chunk table."""
-        p = F.softmax(hidden_logits / self.temperature, dim=-1)
+        """Filter hidden probs by compat, mix through chunk table, return log-probs."""
+        p = hidden_log_probs.exp()
         compat = self._compat_mask(observed_slots, num_observed)
         p_posterior = p * compat
         norm = p_posterior.sum(dim=-1, keepdim=True).clamp(min=1e-30)

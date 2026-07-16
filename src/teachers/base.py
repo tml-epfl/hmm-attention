@@ -11,8 +11,14 @@ class ARTeacher(nn.Module, ABC):
     """Abstract autoregressive teacher.
 
     Subclasses only need to implement `dim`, `context_length`, and
-    `next_token_logits(context)`. Sequence-level operations (per-position
+    `next_token_log_probs(context)`. Sequence-level operations (per-position
     unrolling and autoregressive-generation prefix slicing) are shared.
+
+    Output convention: every teacher returns **log-probabilities** — a (B, dim)
+    tensor that sums to 1 when exponentiated along the last dim. This is the
+    only representation shared across teacher families (HierarchicalTeacher has
+    no coherent raw-logit form because its output mixes softmaxed hidden
+    distributions through a chunk table).
     """
 
     @property
@@ -26,8 +32,8 @@ class ARTeacher(nn.Module, ABC):
         """Number of tokens the teacher looks at to predict the next one."""
 
     @abstractmethod
-    def next_token_logits(self, context: torch.Tensor) -> torch.Tensor:
-        """Predict next-token logits (or log-probs) from a fixed-size context.
+    def next_token_log_probs(self, context: torch.Tensor) -> torch.Tensor:
+        """Predict next-token log-probabilities from a fixed-size context.
 
         Args:
             context: shape (B, context_length, dim). Callers must hand exactly
@@ -35,13 +41,11 @@ class ARTeacher(nn.Module, ABC):
                 slicing from a longer prefix.
 
         Returns:
-            (B, dim) tensor. The convention (logits vs log-probs) is documented
-            per subclass; downstream code that needs a normalized distribution
-            should apply softmax when appropriate.
+            (B, dim) log-probabilities. `.exp()` sums to 1 along the last dim.
         """
 
     def predict_next(self, prefix: torch.Tensor) -> torch.Tensor:
-        """Autoregressive single-step prediction.
+        """Autoregressive single-step prediction (log-probs).
 
         Auto-slices to the trailing `context_length` tokens so callers can hand
         any prefix `>= context_length` in length.
@@ -52,7 +56,7 @@ class ARTeacher(nn.Module, ABC):
             )
         if prefix.shape[-2] > self.context_length:
             prefix = prefix[..., -self.context_length :, :]
-        return self.next_token_logits(prefix)
+        return self.next_token_log_probs(prefix)
 
     def unroll(
         self,
@@ -70,7 +74,7 @@ class ARTeacher(nn.Module, ABC):
                 shape (B, L - context_length, dim).
 
         Returns:
-            Either logits (B, L - context_length, dim) or a (logits, targets) tuple.
+            Either log-probs (B, L - context_length, dim) or a (log_probs, targets) tuple.
         """
         B, L, D = sequence.shape
         if L <= self.context_length:
@@ -81,12 +85,12 @@ class ARTeacher(nn.Module, ABC):
             seq=sequence, window=self.context_length, pad=0
         )
         # contexts: (B * (L - ctx), ctx, D); targets: (B * (L - ctx), D)
-        logits_flat = self.next_token_logits(contexts)  # (B * (L - ctx), D)
-        logits = logits_flat.view(B, L - self.context_length, D)
+        log_probs_flat = self.next_token_log_probs(contexts)  # (B * (L - ctx), D)
+        log_probs = log_probs_flat.view(B, L - self.context_length, D)
         if return_targets:
             targets = targets.view(B, L - self.context_length, D)
-            return logits, targets
-        return logits
+            return log_probs, targets
+        return log_probs
 
     def with_lag_restriction(self, k: int) -> "ARTeacher":
         """Return a shallow-copy teacher with AR context restricted to k lags.

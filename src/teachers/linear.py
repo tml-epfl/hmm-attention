@@ -3,6 +3,7 @@ from typing import List, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.teachers.base import ARTeacher
 from src.utils import random_orthogonal_matrices, random_unit_norm_matrix
@@ -18,8 +19,10 @@ class LinearARTeacher(ARTeacher):
     per-lag weight matrices `_params[i]` shape `(dim, dim)`. Optionally, a
     `stride` schedule places span start positions with overlap.
 
-    `next_token_logits` returns raw un-normalized outputs (call softmax with a
-    temperature to obtain a probability distribution).
+    `next_token_log_probs` returns log-probabilities (log-softmax of the raw
+    linear output). Distribution sharpness is controlled by the `scale`
+    argument in `from_parameters`, which multiplies the weight matrices —
+    equivalent to a softmax temperature of `1/scale`.
     """
 
     def __init__(
@@ -91,8 +94,8 @@ class LinearARTeacher(ARTeacher):
     def _get_weights(self) -> torch.Tensor:
         return self._params
 
-    def next_token_logits(self, context: torch.Tensor) -> torch.Tensor:
-        """context: (B, context_length, dim). Returns (B, dim) raw logits."""
+    def next_token_log_probs(self, context: torch.Tensor) -> torch.Tensor:
+        """context: (B, context_length, dim). Returns (B, dim) log-probs."""
         if context.shape[-2] != self.context_length:
             raise ValueError(
                 f"context has {context.shape[-2]} tokens; expected exactly {self.context_length}"
@@ -123,7 +126,7 @@ class LinearARTeacher(ARTeacher):
         # (window, dim, dim) x (B, window, dim, 1) -> (B, window, dim, 1) -> sum -> (B, dim)
         weights = self._params.unsqueeze(0)  # (1, window, dim, dim)
         out = torch.matmul(weights, x_agg.unsqueeze(-1)).squeeze(-1).sum(dim=-2)
-        return out
+        return F.log_softmax(out, dim=-1)
 
     # --- Lag restriction ---
     def with_lag_restriction(self, k: int) -> "LinearARTeacher":
