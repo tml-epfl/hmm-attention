@@ -14,7 +14,7 @@ Provides two independent representations:
 Use `log_attention` as a wrapper when you want either or both attention functions.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
@@ -195,53 +195,52 @@ def log_attention_heatmap(
     run.log({log_key: images}, step=step)
 
 
+def _span_column_ranges(
+    span_lengths: List[int],
+    context_length: int,
+    seq_len: int,
+    stride: Optional[int] = None,
+) -> List[Tuple[int, int]]:
+    """Absolute `(start, end)` column ranges of each span in the trimmed attention axis.
+
+    The context window occupies the last `context_length` columns. Within it,
+    span `k` starts at `k * stride` (with stride) or `sum(span_lengths[:k])`
+    (without). Ranges are clipped to `[0, seq_len)` so callers can slice
+    directly. Returned as a list of half-open `(start, end)` pairs — one per
+    span.
+    """
+    context_start = seq_len - context_length
+    ranges: List[Tuple[int, int]] = []
+    for k, span_len in enumerate(span_lengths):
+        if stride is not None:
+            start_in_context = k * stride
+        else:
+            start_in_context = sum(span_lengths[:k])
+        abs_start = max(0, min(context_start + start_in_context, seq_len))
+        abs_end = max(0, min(abs_start + span_len, seq_len))
+        ranges.append((abs_start, abs_end))
+    return ranges
+
+
 def compute_gt_attention_row(
     span_lengths: List[int],
     context_length: int,
     seq_len: int,
     stride: Optional[int] = None,
 ) -> np.ndarray:
-    """Compute the ground-truth attention row for the last query position.
+    """Ground-truth last-query attention row: uniform over each span's positions.
 
-    For each head h, the ground truth is a uniform distribution over the
-    span_lengths[h] positions that correspond to lag h in the trimmed attention
-    sequence.  The context window occupies the last `context_length` columns of
-    the trimmed sequence, and within that window the spans are laid out as:
-        - without stride: span h starts at sum(span_lengths[:h])
-        - with stride s:  span h starts at h * s
+    For each head `h`, produces a distribution supported uniformly on the
+    columns that belong to span `h` inside the trimmed attention axis. Row
+    sums to 1.0 for non-degenerate spans (0 otherwise).
 
-    Args:
-        span_lengths: per-head span lengths (list of ints, length == num_heads)
-        context_length: total context window length (sum of spans or stride-based)
-        seq_len: length of the trimmed attention axis (the `length` dimension
-                 after prefix trimming in Trainer._run_student)
-        stride: stride between spans; None means non-overlapping
-
-    Returns:
-        gt: np.ndarray of shape (num_heads, seq_len), each row sums to 1.0
+    Returns shape `(num_heads, seq_len)`.
     """
-    num_heads = len(span_lengths)
-    gt = np.zeros((num_heads, seq_len), dtype=np.float32)
-
-    # The relevant context for the last query occupies these columns.
-    context_start = seq_len - context_length
-
-    for h in range(num_heads):
-        if stride is not None:
-            span_start_in_context = h * stride
-        else:
-            span_start_in_context = sum(span_lengths[:h])
-
-        span_len = span_lengths[h]
-        abs_start = context_start + span_start_in_context
-        abs_end = abs_start + span_len
-
-        abs_start = max(0, min(abs_start, seq_len))
-        abs_end = max(0, min(abs_end, seq_len))
-
-        if abs_end > abs_start:
-            gt[h, abs_start:abs_end] = 1.0 / (abs_end - abs_start)
-
+    ranges = _span_column_ranges(span_lengths, context_length, seq_len, stride)
+    gt = np.zeros((len(span_lengths), seq_len), dtype=np.float32)
+    for h, (start, end) in enumerate(ranges):
+        if end > start:
+            gt[h, start:end] = 1.0 / (end - start)
     return gt
 
 
@@ -374,10 +373,10 @@ def log_value_matrix_alignment(
 
     # Per-head student norms as scalars.
     for h, norm in enumerate(student_norms):
-        log_dict[f"{split}_value_student_norm_head{h}"] = norm
+        log_dict[f"attn/{split}_value_norm_head{h}"] = norm
 
     # Heatmap: cosine similarity (all pairs).
-    log_dict[f"{split}_value_cosine_sim"] = _heatmap_image(
+    log_dict[f"attn/{split}_value_cos_sim"] = _heatmap_image(
         cos_sim_mat,
         row_labels,
         col_labels,
@@ -390,7 +389,7 @@ def log_value_matrix_alignment(
 
     # Heatmap: projected norm (all pairs).
     abs_max = float(np.abs(proj_norm_mat).max()) or 1.0
-    log_dict[f"{split}_value_proj_norm"] = _heatmap_image(
+    log_dict[f"attn/{split}_value_proj_norm"] = _heatmap_image(
         proj_norm_mat,
         row_labels,
         col_labels,
@@ -488,8 +487,8 @@ def log_value_alignment_scalars(
             inner = float(np.dot(w, a))
             # Cosine similarity: normalized to [-1, 1]
             cos = inner / (w_norm * a_norm) if a_norm > 0 else 0.0
-            log_dict[f"{split}_value_cosine_head{h}_teacher{k}"] = cos
-            log_dict[f"{split}_value_inner_head{h}_teacher{k}"] = inner
+            log_dict[f"attn/{split}_value_cos_head{h}_teacher{k}"] = cos
+            log_dict[f"attn/{split}_value_inner_head{h}_teacher{k}"] = inner
 
     run.log(log_dict, step=step)
 
@@ -567,10 +566,10 @@ def log_attention_alignment(
 
     # Per-head student norms as scalars.
     for h, norm in enumerate(student_norms):
-        log_dict[f"{split}_attn_student_norm_head{h}"] = norm
+        log_dict[f"attn/{split}_align_norm_head{h}"] = norm
 
     # Heatmap: cosine similarity (all pairs).
-    log_dict[f"{split}_attn_cosine_sim"] = _heatmap_image(
+    log_dict[f"attn/{split}_align_cos_sim"] = _heatmap_image(
         cos_sim_mat,
         row_labels,
         col_labels,
@@ -583,7 +582,7 @@ def log_attention_alignment(
 
     # Heatmap: projected norm (all pairs).
     abs_max = float(np.abs(proj_norm_mat).max()) or 1.0
-    log_dict[f"{split}_attn_proj_norm"] = _heatmap_image(
+    log_dict[f"attn/{split}_align_proj_norm"] = _heatmap_image(
         proj_norm_mat,
         row_labels,
         col_labels,
@@ -626,7 +625,7 @@ def log_attention_alignment(
         bar_images.append(wandb.Image(fig, caption=f"Head {h}"))
         plt.close(fig)
 
-    log_dict[f"{split}_attn_offset_charts"] = bar_images
+    log_dict[f"attn/{split}_offset_charts"] = bar_images
     run.log(log_dict, step=step)
 
 
@@ -672,28 +671,13 @@ def log_attention_span_mass(
         return
 
     num_heads, seq_len, _ = attn_avg.shape
-    num_spans = len(span_lengths)
-
-    # Last-query attention row per head: shape (num_heads, seq_len).
-    last_rows = attn_avg[:, -1, :]
-
-    # Determine where the context window starts in the sequence.
-    context_start = seq_len - context_length
+    last_rows = attn_avg[:, -1, :]  # (num_heads, seq_len)
+    ranges = _span_column_ranges(span_lengths, context_length, seq_len, stride)
 
     log_dict: dict = {}
-    for k in range(num_spans):
-        # Locate span k's positions within the context window.
-        if stride is not None:
-            span_start_in_context = k * stride
-        else:
-            span_start_in_context = sum(span_lengths[:k])
-
-        abs_start = max(0, context_start + span_start_in_context)
-        abs_end = min(seq_len, abs_start + span_lengths[k])
-
-        # Sum attention mass over this span's positions for each head.
+    for k, (start, end) in enumerate(ranges):
         for h in range(num_heads):
-            mass = float(last_rows[h, abs_start:abs_end].sum())
-            log_dict[f"{split}_attn_mass_head{h}_span{k}"] = mass
+            mass = float(last_rows[h, start:end].sum())
+            log_dict[f"attn/{split}_span_mass_head{h}_span{k}"] = mass
 
     run.log(log_dict, step=step)

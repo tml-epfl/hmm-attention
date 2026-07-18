@@ -13,7 +13,7 @@ defaults:
   - misc: default
   - predictor: classification
   - experiments: null
-  - override hydra/launcher: ray
+  # - override hydra/launcher: ray
 
 hydra:
   job:

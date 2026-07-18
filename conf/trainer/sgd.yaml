@@ -4,4 +4,3 @@ ngram_steps: 0 # disable n-gram training
 batch_size: 3000
 replacement: False
 max_grad_norm: 1.0
-max_student_norm: auto

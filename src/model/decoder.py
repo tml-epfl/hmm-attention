@@ -181,7 +181,6 @@ class TransformerDecoder(nn.Module):
         # Custom initialization scales for attention weights
         value_init_scale: Optional[float] = None,
         query_init_scale: Optional[float] = None,
-        teacher_target: bool = False,
     ):
         super(TransformerDecoder, self).__init__()
 
@@ -216,7 +215,6 @@ class TransformerDecoder(nn.Module):
         self.pe_embedding_dim = pe_embedding_dim
         self.value_init_scale = value_init_scale
         self.query_init_scale = query_init_scale
-        self.teacher_target = teacher_target
 
         # Ensure at least one of query or key projection is enabled for learning
         if not use_query_projection and not use_key_projection:

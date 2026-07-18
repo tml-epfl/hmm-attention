@@ -6,7 +6,6 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import tqdm
-import wandb
 
 from src.loss import CrossentropyLoss
 from src.metrics import (
@@ -19,7 +18,9 @@ from src.metrics import (
 )
 from src.teachers import ARTeacher
 from src.trainer.attention_logger import AttentionLogger
+from src.trainer.config import LoggingConfig, NgramConfig, SchedulerConfig
 from src.trainer.ngram_eval import NgramEvaluator
+from src.trainer.registry import MetricRegistry
 from src.trainer.teacher_eval import TeacherEvaluator
 
 
@@ -34,49 +35,37 @@ class Trainer(ABC):
     def __init__(
         self,
         steps: int,
-        ngram_steps: int,
         device: torch.device,
         teacher: torch.nn.Module,
         student: torch.nn.Module,
-        ngram_models: Dict[str, torch.nn.Module],
         train_loader: torch.utils.data.DataLoader,
         val_loader: Optional[torch.utils.data.DataLoader],
         loss_fn: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
-        optim_ngram: Dict[str, torch.optim.Optimizer],
-        scheduler: torch.optim.lr_scheduler._LRScheduler,
-        pass_sched_metric: bool = False,
-        update_sched_on_iter: bool = False,
+        scheduler_cfg: SchedulerConfig,
+        ngram_cfg: NgramConfig,
+        logging_cfg: LoggingConfig,
         max_grad_norm: Optional[float] = None,
-        max_student_norm: Optional[float] = None,
-        writer: Optional[wandb.run] = None,
-        log_attention_frequency: int = 100,
     ) -> None:
         self.steps = steps
-        self.ngram_steps = ngram_steps
         self.current_step = 0
 
         self.device = device
         self.teacher = teacher
         self.student = student
-        self.ngram_models = ngram_models
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.loss_fn = loss_fn
         self.optimizer = optimizer
-        self.optim_ngram = optim_ngram
-        self.scheduler = scheduler
-        self.pass_sched_metric = pass_sched_metric
-        self.update_sched_on_iter = update_sched_on_iter
+        self.scheduler_cfg = scheduler_cfg
+        self.ngram_cfg = ngram_cfg
+        self.logging_cfg = logging_cfg
         self.max_grad_norm = max_grad_norm
-        self.max_student_norm = max_student_norm
-        self.writer = writer
-        self.log_attention_frequency = log_attention_frequency
         self.logger = logging.getLogger()
 
         # Populated in _init_loop after models are moved to device.
         self.teacher_eval: Optional[TeacherEvaluator] = None
-        self.ngram_eval: Optional[NgramEvaluator] = None
+        self.ngram_evals: Dict[str, NgramEvaluator] = {}
         self.attention_logger: Optional[AttentionLogger] = None
 
     # --- Entry point ---
@@ -89,7 +78,7 @@ class Trainer(ABC):
         start = time.time()
         while self.current_step < self.steps:
             # Two phases: first ngram models, then the student.
-            if self.current_step < self.ngram_steps:
+            if self.current_step < self.ngram_cfg.steps:
                 self._train_ngram()
             else:
                 self._train_loop()
@@ -99,15 +88,15 @@ class Trainer(ABC):
 
     # --- LR scheduler ---
     def _call_lr_sched(self, metric: torch.Tensor) -> None:
-        if self.pass_sched_metric:
-            self.scheduler.step(metric)
+        if self.scheduler_cfg.pass_metric:
+            self.scheduler_cfg.scheduler.step(metric)
         else:
-            self.scheduler.step()
+            self.scheduler_cfg.scheduler.step()
 
     def _update_lr_sched(self, metric: torch.Tensor, epoch_end: bool) -> None:
-        if self.update_sched_on_iter and not epoch_end:
+        if self.scheduler_cfg.update_on_iter and not epoch_end:
             self._call_lr_sched(metric)
-        if not self.update_sched_on_iter and epoch_end:
+        if not self.scheduler_cfg.update_on_iter and epoch_end:
             self._call_lr_sched(metric)
 
     # --- Student forward + per-batch metrics ---
@@ -140,14 +129,17 @@ class Trainer(ABC):
         out, target, attn_weights = self._run_student(data)
         loss = self.loss_fn(out, target)
 
-        self.metrics[f"{split}_loss"].update(loss.item(), data.size(0))
-        self.metrics[f"{split}_acc"].update(out, target)
+        self.metrics[f"student/{split}_loss"].update(loss.item(), data.size(0))
+        self.metrics[f"student/{split}_acc"].update(out, target)
 
         if isinstance(self.teacher, ARTeacher):
             self.teacher_eval.update_kl_metrics(out, data, split, self.metrics)
-            self.ngram_eval.update_kl_metrics(out, data, split, self.metrics)
+            for ne in self.ngram_evals.values():
+                ne.update_kl(out, data, split, self.metrics)
             true_loss = self.teacher_eval.true_loss(out, data, self.loss_fn)
-            self.metrics[f"{split}_true_loss"].update(true_loss.item(), data.size(0))
+            self.metrics[f"student/{split}_true_loss"].update(
+                true_loss.item(), data.size(0)
+            )
 
         return out, target, loss, attn_weights
 
@@ -155,71 +147,67 @@ class Trainer(ABC):
     def _init_loop(self) -> None:
         self.teacher = self.teacher.to(self.device)
         self.student = self.student.to(self.device)
-        for m in self.ngram_models.values():
+        for m in self.ngram_cfg.models.values():
             m.to(self.device)
 
         self.teacher_eval = TeacherEvaluator(self.teacher, self.device)
-        self.ngram_eval = NgramEvaluator(
-            self.ngram_models,
-            self.optim_ngram,
-            self.teacher,
-            self.teacher_eval,
-        )
+        self.ngram_evals = {
+            name: NgramEvaluator(
+                name=name,
+                model=model,
+                optimizer=self.ngram_cfg.optimizers[name],
+                teacher=self.teacher,
+                teacher_evaluator=self.teacher_eval,
+            )
+            for name, model in self.ngram_cfg.models.items()
+        }
         self.attention_logger = AttentionLogger(
-            writer=self.writer,
+            writer=self.logging_cfg.writer,
             teacher=self.teacher,
             student=self.student,
-            frequency=self.log_attention_frequency,
+            frequency=self.logging_cfg.attention_frequency,
         )
 
-        self.history = {
-            "train_loss": [],
-            "train_true_loss": [],
-            "train_acc": [],
-            "val_loss": [],
-            "val_true_loss": [],
-            "val_acc": [],
-            "val_best": [],
-            "grad_norm": [],
-        }
-        self.metrics = {
-            "train_loss": LossMetric(),
-            "train_true_loss": LossMetric(),
-            "train_acc": AccuracyMetric(k=1),
-            "val_loss": LossMetric(),
-            "val_true_loss": LossMetric(),
-            "val_acc": AccuracyMetric(k=1),
-            "val_best": MinMetric(),
-            "grad_norm": LossMetric(),
-        }
+        self.history: Dict[str, List[float]] = {}
+        self.metrics = MetricRegistry()
+        for key, metric in (
+            ("student/train_loss", LossMetric()),
+            ("student/train_true_loss", LossMetric()),
+            ("student/train_acc", AccuracyMetric(k=1)),
+            ("student/val_loss", LossMetric()),
+            ("student/val_true_loss", LossMetric()),
+            ("student/val_acc", AccuracyMetric(k=1)),
+            ("student/val_best", MinMetric()),
+            ("student/grad_norm", LossMetric()),
+        ):
+            self.history[key] = []
+            self.metrics.register(key, metric)
 
         if isinstance(self.teacher, ARTeacher):
             self._register_metrics(self.teacher_eval.metric_keys(), LossMetric)
-            self._register_metrics(self.ngram_eval.kl_metric_keys(), LossMetric)
             self._register_metrics(
-                ["teacher_train_loss", "teacher_val_loss"], ConstantLossMetric
+                ["teacher/train_loss", "teacher/val_loss"], ConstantLossMetric
             )
             self._register_metrics(
-                ["teacher_train_acc", "teacher_val_acc"], ConstantAccuracyMetric, k=1
+                ["teacher/train_acc", "teacher/val_acc"], ConstantAccuracyMetric, k=1
             )
-            for name in self.ngram_models:
-                self._register_metrics([f"{name}_train_loss"], LossMetric)
-                self._register_metrics([f"{name}_train_acc"], AccuracyMetric, k=1)
-                self._register_metrics([f"{name}_val_loss"], LossMetric)
-                self._register_metrics([f"{name}_val_acc"], AccuracyMetric, k=1)
+            for ne in self.ngram_evals.values():
+                self._register_metrics(ne.kl_metric_keys(), LossMetric)
+                self._register_metrics(ne.loss_metric_keys(), LossMetric)
+                self._register_metrics(ne.acc_metric_keys(), AccuracyMetric, k=1)
 
-        for key, metric in self.metrics.items():
-            setattr(self, key, metric)
-
-        self.lr_metric = self.train_loss if self.update_sched_on_iter else self.val_loss
+        self.lr_metric = (
+            self.metrics["student/train_loss"]
+            if self.scheduler_cfg.update_on_iter
+            else self.metrics["student/val_loss"]
+        )
 
     def _register_metrics(
         self, metrics: List[str], metric_class, **constructor_kwargs
     ) -> None:
-        self.history.update({key: [] for key in metrics})
-        self.metrics.update(
-            {key: metric_class(**constructor_kwargs) for key in metrics}
-        )
+        for key in metrics:
+            self.history[key] = []
+            self.metrics.register(key, metric_class(**constructor_kwargs))
 
     def _dry_loop(self) -> None:
         """One-shot pass over train + val to populate the constant teacher metrics."""
@@ -236,10 +224,10 @@ class Trainer(ABC):
                 )
                 # CE and KL both apply log_softmax internally, which is a
                 # near-identity on log-probs (see src/loss.py:55).
-                self.metrics[f"teacher_{split}_loss"].update(
+                self.metrics[f"teacher/{split}_loss"].update(
                     self.loss_fn(log_probs, target).item(), target.shape[0]
                 )
-                self.metrics[f"teacher_{split}_acc"].update(log_probs, target)
+                self.metrics[f"teacher/{split}_acc"].update(log_probs, target)
                 pbar.update()
             pbar.close()
 
@@ -263,19 +251,20 @@ class Trainer(ABC):
         self.attention_logger.log(step, "val", attn_batches)
 
     def _val_ngram(self) -> None:
-        for model in self.ngram_models.values():
-            model.eval()
+        for ne in self.ngram_evals.values():
+            ne.model.eval()
         self.teacher.eval()
-        use_teacher_target = self.student.teacher_target
         for data in self.val_loader:
             with torch.no_grad():
                 data = data.to(self.device)
-                for name in self.ngram_models:
-                    logits, target, loss = self.ngram_eval.eval_step(
-                        name, data, self.loss_fn, use_teacher_target
+                for ne in self.ngram_evals.values():
+                    logits, target, loss = ne.eval_step(
+                        data, self.loss_fn, self.ngram_cfg.use_teacher_target
                     )
-                    self.metrics[f"{name}_val_loss"].update(loss.item(), data.size(0))
-                    self.metrics[f"{name}_val_acc"].update(logits, target)
+                    self.metrics[f"ngram_{ne.name}/val_loss"].update(
+                        loss.item(), data.size(0)
+                    )
+                    self.metrics[f"ngram_{ne.name}/val_acc"].update(logits, target)
 
     # --- End-of-step book-keeping ---
     def _end_step(
@@ -284,21 +273,20 @@ class Trainer(ABC):
         self.logger.info(self._step_str(step, step_time, ngram))
 
         if self.val_loader is not None:
-            loss_avg = self.val_loss.compute()
-            if loss_avg < self.val_best.compute():
-                self.val_best.update(loss_avg)
+            loss_avg = self.metrics["student/val_loss"].compute()
+            if loss_avg < self.metrics["student/val_best"].compute():
+                self.metrics["student/val_best"].update(loss_avg)
 
         if ngram:
             ngram_metrics = {
-                f"{name}_{split}_{suffix}": self.metrics[f"{name}_{split}_{suffix}"]
-                for name in self.ngram_models
-                for split in ("train", "val")
-                for suffix in ("loss", "acc")
+                key: self.metrics[key]
+                for ne in self.ngram_evals.values()
+                for key in ne.loss_metric_keys() + ne.acc_metric_keys()
             }
         else:
             ngram_metrics = None
 
-        if self.writer is not None:
+        if self.logging_cfg.writer is not None:
             self._write_to_wandb(step, ngram_metrics)
 
         metrics = ngram_metrics or self.metrics
@@ -317,26 +305,28 @@ class Trainer(ABC):
         if step_time:
             s += f"| Step time: {step_time:.1f}s"
         if ngram:
-            for name in self.ngram_models:
+            for ne in self.ngram_evals.values():
                 s += (
-                    f"| {name} Train loss: {self.metrics[f'{name}_train_loss'].compute():.3f} "
-                    f"| {name} Train acc: {self.metrics[f'{name}_train_acc'].compute():.3f} "
+                    f"| {ne.name} Train loss: {self.metrics[f'ngram_{ne.name}/train_loss'].compute():.3f} "
+                    f"| {ne.name} Train acc: {self.metrics[f'ngram_{ne.name}/train_acc'].compute():.3f} "
                 )
         else:
-            s += f"| Train loss: {self.train_loss.compute():.3f} "
+            s += f"| Train loss: {self.metrics['student/train_loss'].compute():.3f} "
             if isinstance(self.loss_fn, CrossentropyLoss):
-                s += f"| Train acc: {self.train_acc.compute():.3f} "
+                s += f"| Train acc: {self.metrics['student/train_acc'].compute():.3f} "
                 if isinstance(self.teacher, ARTeacher):
-                    s += f"| Train teacher acc: {self.teacher_train_acc.compute():.3f} "
+                    s += f"| Train teacher acc: {self.metrics['teacher/train_acc'].compute():.3f} "
         return s
 
     def _write_to_wandb(self, step: int, ngram_metrics=None) -> None:
         metrics = ngram_metrics or self.metrics
         log_metrics = {name: metric.compute() for name, metric in metrics.items()}
-        if self.scheduler is None:
+        if self.scheduler_cfg.scheduler is None:
             raise ValueError("Scheduler is None, cannot log learning rate.")
-        log_metrics["learning_rate"] = self.scheduler.get_last_lr()[0]
-        self.writer.log(log_metrics, step=step)
+        log_metrics["system/learning_rate"] = (
+            self.scheduler_cfg.scheduler.get_last_lr()[0]
+        )
+        self.logging_cfg.writer.log(log_metrics, step=step)
 
     def _write_to_json(self, path: str, epoch: int) -> None:
         for key, metric in self.metrics.items():

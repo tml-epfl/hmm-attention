@@ -46,7 +46,7 @@ class SGDTrainer(Trainer):
                     if p.grad is not None
                 )
             )
-            self.grad_norm.update(grad_norm.item(), data.shape[0])
+            self.metrics["student/grad_norm"].update(grad_norm.item(), data.shape[0])
 
             self.attention_logger.log(self.current_step, "train", [attn_weights])
             self._val_loop(self.current_step)
@@ -56,32 +56,32 @@ class SGDTrainer(Trainer):
                 break
 
     def _train_ngram(self) -> None:
-        for model in self.ngram_models.values():
-            model.train()
+        for ne in self.ngram_evals.values():
+            ne.model.train()
         self.teacher.eval()
-        use_teacher_target = self.student.teacher_target
 
         for data in self.train_loader:
-            if self.current_step >= self.ngram_steps:
+            if self.current_step >= self.ngram_cfg.steps:
                 break
             data = data.to(self.device)
-            for name in self.ngram_models:
-                logits, target, loss = self.ngram_eval.train_step(
-                    name, data, self.loss_fn, use_teacher_target
+            for ne in self.ngram_evals.values():
+                logits, target, loss = ne.train_step(
+                    data, self.loss_fn, self.ngram_cfg.use_teacher_target
                 )
-                self.metrics[f"{name}_train_loss"].update(loss.item(), data.size(0))
-                self.metrics[f"{name}_train_acc"].update(logits, target)
+                self.metrics[f"ngram_{ne.name}/train_loss"].update(
+                    loss.item(), data.size(0)
+                )
+                self.metrics[f"ngram_{ne.name}/train_acc"].update(logits, target)
 
             self._val_ngram()
             self._end_step(self.current_step, step_time=None, ngram=True)
             self.current_step += 1
-            if self.current_step >= self.ngram_steps:
+            if self.current_step >= self.ngram_cfg.steps:
                 break
 
     def _clear_aux_metrics(self) -> None:
         """Ngram-training-only metrics — drop before student training starts."""
-        for name in self.ngram_models:
-            for suffix in ("train_loss", "train_acc", "val_loss", "val_acc"):
-                key = f"{name}_{suffix}"
+        for ne in self.ngram_evals.values():
+            for key in ne.loss_metric_keys() + ne.acc_metric_keys():
                 self.metrics.pop(key, None)
                 self.history.pop(key, None)

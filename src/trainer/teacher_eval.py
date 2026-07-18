@@ -31,10 +31,10 @@ class TeacherEvaluator:
     def metric_keys(self) -> List[str]:
         if not self.is_ar:
             return []
-        keys = ["kl_div_teacher_train", "kl_div_teacher_val"]
+        keys = ["kl/teacher_train", "kl/teacher_val"]
         for k in self.prefix_ks:
             for split in ("train", "val"):
-                keys.append(f"kl_div_prefix_{k}_teacher_{split}")
+                keys.append(f"kl/teacher_k{k}_{split}")
         return keys
 
     def _resolve(self, prefix: int):
@@ -79,12 +79,12 @@ class TeacherEvaluator:
             return
         kl = KLDivergenceLoss(reduction="mean")
         probs, _, _ = self.run(data, prefix=-1, normalize=True)
-        metrics[f"kl_div_teacher_{split}"].update(
+        metrics[f"kl/teacher_{split}"].update(
             kl(student_out, probs).item(), data.size(0)
         )
         for k in self.prefix_ks:
             probs_k, _, _ = self.run(data, prefix=k, normalize=True)
-            metrics[f"kl_div_prefix_{k}_teacher_{split}"].update(
+            metrics[f"kl/teacher_k{k}_{split}"].update(
                 kl(student_out, probs_k).item(), data.size(0)
             )
 

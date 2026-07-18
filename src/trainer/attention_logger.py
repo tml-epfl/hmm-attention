@@ -50,63 +50,73 @@ class AttentionLogger:
 
         # (layer, batch, head, seq_len, seq_len); concat along batch.
         attn_weights = torch.cat(attn_weight_batches, dim=1)
-        # First layer, averaged over batch: (heads, seq_len, seq_len)
-        attn_np = attn_weights[0].detach().cpu().numpy()
-        attn_avg = attn_np.mean(axis=0)
+        n_layers = attn_weights.shape[0]
 
-        log_attention_table(
-            run=self.writer,
-            attn_weights=attn_weights,
-            layer=0,
-            batch_idx=-1,
-            step=step,
-            table_key=f"{split}_attention_weights",
-        )
-        log_attention_heatmap(
-            run=self.writer,
-            attn_weights=attn_avg,
-            log_key=f"{split}_attention_heatmaps",
-            step=step,
-        )
+        for layer in range(n_layers):
+            # Single-block runs keep the historical wandb keys (no `_L0`
+            # suffix); multi-block runs get per-layer keys so wandb does
+            # not overwrite them.
+            suffix = "" if n_layers == 1 else f"_L{layer}"
 
-        if isinstance(self.teacher, LinearARTeacher):
-            stride: Optional[int] = getattr(self.teacher, "stride", None)
-            ctx_len = getattr(
-                self.teacher, "context_length", sum(self.teacher.span_lengths)
+            # Batch-averaged per-layer attention: (heads, seq_len, seq_len)
+            attn_avg = (
+                attn_weights[layer].detach().cpu().numpy().mean(axis=0)
             )
-            log_attention_alignment(
+
+            log_attention_table(
                 run=self.writer,
-                attn_avg=attn_avg,
-                span_lengths=self.teacher.span_lengths,
-                context_length=ctx_len,
+                attn_weights=attn_weights,
+                layer=layer,
+                batch_idx=-1,
                 step=step,
-                split=split,
-                stride=stride,
+                table_key=f"attn/{split}{suffix}_weights",
             )
-            log_attention_span_mass(
+            log_attention_heatmap(
                 run=self.writer,
-                attn_avg=attn_avg,
-                span_lengths=self.teacher.span_lengths,
-                context_length=ctx_len,
+                attn_weights=attn_avg,
+                log_key=f"attn/{split}{suffix}_heatmaps",
                 step=step,
-                split=split,
-                stride=stride,
             )
-            log_value_matrix_alignment(
-                run=self.writer,
-                teacher_matrices=self.teacher._params,
-                student=self.student,
-                dim=self.teacher.dim,
-                step=step,
-                split=split,
-                layer=0,
-            )
-            log_value_alignment_scalars(
-                run=self.writer,
-                teacher_matrices=self.teacher._params,
-                student=self.student,
-                dim=self.teacher.dim,
-                step=step,
-                split=split,
-                layer=0,
-            )
+
+            if isinstance(self.teacher, LinearARTeacher):
+                stride: Optional[int] = getattr(self.teacher, "stride", None)
+                ctx_len = getattr(
+                    self.teacher, "context_length", sum(self.teacher.span_lengths)
+                )
+                split_layer = f"{split}{suffix}"
+                log_attention_alignment(
+                    run=self.writer,
+                    attn_avg=attn_avg,
+                    span_lengths=self.teacher.span_lengths,
+                    context_length=ctx_len,
+                    step=step,
+                    split=split_layer,
+                    stride=stride,
+                )
+                log_attention_span_mass(
+                    run=self.writer,
+                    attn_avg=attn_avg,
+                    span_lengths=self.teacher.span_lengths,
+                    context_length=ctx_len,
+                    step=step,
+                    split=split_layer,
+                    stride=stride,
+                )
+                log_value_matrix_alignment(
+                    run=self.writer,
+                    teacher_matrices=self.teacher._params,
+                    student=self.student,
+                    dim=self.teacher.dim,
+                    step=step,
+                    split=split_layer,
+                    layer=layer,
+                )
+                log_value_alignment_scalars(
+                    run=self.writer,
+                    teacher_matrices=self.teacher._params,
+                    student=self.student,
+                    dim=self.teacher.dim,
+                    step=step,
+                    split=split_layer,
+                    layer=layer,
+                )
