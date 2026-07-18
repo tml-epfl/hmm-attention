@@ -2,7 +2,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 import wandb
-from hydra.utils import instantiate
+from hydra.utils import get_class, instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from src.predictors import build_predictor
@@ -110,18 +110,27 @@ def get_trainer(cfg: DictConfig) -> Trainer:
         models=ngram_models,
         optimizers=optim_ngram,
         steps=cfg.trainer.ngram_steps,
-        use_teacher_target=cfg.trainer.get("use_teacher_target", False),
+        use_teacher_target=(
+            cfg.trainer.use_teacher_target
+            if "use_teacher_target" in cfg.trainer
+            else False
+        ),
     )
     logging_cfg = LoggingConfig(
         writer=writer,
         attention_frequency=cfg.misc.log_attention_frequency,
     )
-    # Fields consumed above must be popped so Hydra doesn't re-pass them.
-    del cfg.trainer.ngram_steps
-    cfg.trainer.pop("use_teacher_target", None)
 
-    return instantiate(
-        cfg.trainer,
+    # Construct the trainer class directly. Hydra's `instantiate` cannot merge
+    # kwargs containing `torch.nn.Module` (or dataclasses wrapping them) into a
+    # DictConfig, so we resolve `_target_` manually and call the constructor.
+    trainer_cls = get_class(cfg.trainer._target_)
+    max_grad_norm = (
+        cfg.trainer.max_grad_norm if "max_grad_norm" in cfg.trainer else None
+    )
+    return trainer_cls(
+        steps=cfg.trainer.steps,
+        max_grad_norm=max_grad_norm,
         device=cfg.misc.device,
         teacher=teacher,
         student=student,

@@ -43,4 +43,3 @@ optimizer:
 misc:
   wandb:
     tags: ["hierarchical-dissection", "span-1-1-1"]
-  device: mps

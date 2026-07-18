@@ -27,3 +27,14 @@ explicit = true
 torch = { index = "pytorch", marker = "sys_platform == 'linux'" }
 torchvision = { index = "pytorch", marker = "sys_platform == 'linux'" }
 torchaudio = { index = "pytorch", marker = "sys_platform == 'linux'" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+filterwarnings = ["ignore::DeprecationWarning"]
