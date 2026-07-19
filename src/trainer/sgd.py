@@ -14,12 +14,14 @@ class SGDTrainer(Trainer):
     """
 
     def _train_step(
-        self, data: torch.Tensor
+        self, data: torch.Tensor, run_teacher_metrics: bool
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         prof = get_profiler()
         self.student.zero_grad()
         self.optimizer.zero_grad()
-        out, target, loss, attn_weights = self._forward_and_metrics(data, split="train")
+        out, target, loss, attn_weights = self._forward_and_metrics(
+            data, split="train", run_teacher_metrics=run_teacher_metrics
+        )
         with prof.cuda("student_backward"):
             loss.backward()
         if self.max_grad_norm is not None:
@@ -29,6 +31,13 @@ class SGDTrainer(Trainer):
         with prof.cuda("optimizer_step"):
             self.optimizer.step()
         return out, target, loss, attn_weights
+
+    def _is_log_step(self) -> bool:
+        """Log this step? True on the last step and every `log_frequency`-th step."""
+        freq = self.logging_cfg.log_frequency
+        return (self.current_step + 1 >= self.steps) or (
+            self.current_step % freq == 0
+        )
 
     def _train_loop(self) -> None:
         self._clear_aux_metrics()
@@ -41,7 +50,8 @@ class SGDTrainer(Trainer):
                 break
             with prof.cuda("data_to_device_train"):
                 data = data.to(self.device)
-            _, _, _, attn_weights = self._train_step(data)
+            log_this_step = self._is_log_step()
+            _, _, _, attn_weights = self._train_step(data, log_this_step)
 
             self._update_lr_sched(self.lr_metric.compute(), epoch_end=False)
 
@@ -55,9 +65,10 @@ class SGDTrainer(Trainer):
             self.metrics["student/grad_norm"].update(grad_norm.item(), data.shape[0])
 
             self.attention_logger.log(self.current_step, "train", [attn_weights])
-            with prof.cuda("val_loop"):
-                self._val_loop(self.current_step)
-            self._end_step(self.current_step, step_time=None, ngram=False)
+            if log_this_step:
+                with prof.cuda("val_loop"):
+                    self._val_loop(self.current_step)
+                self._end_step(self.current_step, step_time=None, ngram=False)
             self.current_step += 1
             if self.current_step >= self.steps:
                 break

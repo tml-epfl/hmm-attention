@@ -119,6 +119,7 @@ def get_trainer(cfg: DictConfig) -> Trainer:
     logging_cfg = LoggingConfig(
         writer=writer,
         attention_frequency=cfg.misc.log_attention_frequency,
+        log_frequency=cfg.misc.get("log_frequency", 1),
     )
 
     # Construct the trainer class directly. Hydra's `instantiate` cannot merge

@@ -2,6 +2,7 @@ seed: 0
 device: cuda
 verbose: true
 log_attention_frequency: 50
+log_frequency: 5
 wandb:
   use: true
   project: hmm-attention

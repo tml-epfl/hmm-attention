@@ -123,12 +123,19 @@ class Trainer(ABC):
         )
 
     def _forward_and_metrics(
-        self, data: torch.Tensor, split: str
+        self,
+        data: torch.Tensor,
+        split: str,
+        run_teacher_metrics: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Student forward + loss/acc + teacher/ngram KL + teacher-target loss.
 
         Returns `(out, target, loss, attn_weights)`. Shared by train and val —
         the training loop only adds `backward` + `optimizer.step` around this.
+
+        `run_teacher_metrics=False` skips the teacher KL / ngram KL / true-loss
+        computations (~`window + 2` extra teacher forwards). Student loss/acc
+        are always updated because they are cheap and drive the LR scheduler.
         """
         prof = get_profiler()
         with prof.cuda(f"run_student_{split}"):
@@ -138,7 +145,7 @@ class Trainer(ABC):
         self.metrics[f"student/{split}_loss"].update(loss.item(), data.size(0))
         self.metrics[f"student/{split}_acc"].update(out, target)
 
-        if isinstance(self.teacher, ARTeacher):
+        if run_teacher_metrics and isinstance(self.teacher, ARTeacher):
             with prof.cuda(f"teacher_kl_{split}"):
                 self.teacher_eval.update_kl_metrics(out, data, split, self.metrics)
             with prof.cuda(f"ngram_kl_{split}"):
