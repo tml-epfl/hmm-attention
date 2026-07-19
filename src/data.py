@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import tqdm
 from torch.utils.data import Dataset
 
 from src.predictors import Predictor
@@ -62,7 +63,14 @@ class ARDataset(Dataset):
         return seq
 
     def _generate(self, number: int, length: int) -> torch.Tensor:
-        return torch.stack([self._generate_seq(length) for _ in range(number)])
+        iterator = tqdm.trange(
+            number,
+            desc=f"Generating {number}x len={self.prefix_length + length}",
+            leave=False,
+            unit="seq",
+            disable=number < 4,
+        )
+        return torch.stack([self._generate_seq(length) for _ in iterator])
 
     def __len__(self) -> int:
         return self.number
