@@ -2,6 +2,7 @@
 defaults:
   - /train
   - override /model@teacher: hierarchical
+  - override /experiments: null
   - _self_
 
 # Hierarchical wrapper: hidden vocab = 64, surface vocab = 64, chunk_size = 2.
