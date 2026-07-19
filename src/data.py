@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from src.predictors import Predictor
+from src.profiling import get_profiler
 from src.utils import split_into_windows
 
 
@@ -42,7 +43,8 @@ class ARDataset(Dataset):
         self.unroll_sequences = unroll_sequences
         self.refresh_sequences = number < 0
         self.prefix_length = prefix_length
-        self.data = self._generate(self.number, self.length)
+        with get_profiler().cuda("dataset_init"):
+            self.data = self._generate(self.number, self.length)
 
     def _burn_in(self, length: int) -> torch.Tensor:
         """Predictor-specific burn-in if available, else uniform one-hot fallback."""

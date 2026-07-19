@@ -8,6 +8,7 @@ import torch
 import tqdm
 
 from src.loss import CrossentropyLoss
+from src.profiling import format_report, get_profiler
 from src.metrics import (
     AccuracyMetric,
     ConstantAccuracyMetric,
@@ -85,6 +86,9 @@ class Trainer(ABC):
         self.logger.info(
             f"Finished training! Total time: {(time.time() - start) / 3600:.2f}h"
         )
+        prof = get_profiler()
+        if prof.enabled:
+            self.logger.info("Profiler report:\n" + format_report(prof.report()))
 
     # --- LR scheduler ---
     def _call_lr_sched(self, metric: torch.Tensor) -> None:
@@ -126,17 +130,22 @@ class Trainer(ABC):
         Returns `(out, target, loss, attn_weights)`. Shared by train and val —
         the training loop only adds `backward` + `optimizer.step` around this.
         """
-        out, target, attn_weights = self._run_student(data)
-        loss = self.loss_fn(out, target)
+        prof = get_profiler()
+        with prof.cuda(f"run_student_{split}"):
+            out, target, attn_weights = self._run_student(data)
+            loss = self.loss_fn(out, target)
 
         self.metrics[f"student/{split}_loss"].update(loss.item(), data.size(0))
         self.metrics[f"student/{split}_acc"].update(out, target)
 
         if isinstance(self.teacher, ARTeacher):
-            self.teacher_eval.update_kl_metrics(out, data, split, self.metrics)
-            for ne in self.ngram_evals.values():
-                ne.update_kl(out, data, split, self.metrics)
-            true_loss = self.teacher_eval.true_loss(out, data, self.loss_fn)
+            with prof.cuda(f"teacher_kl_{split}"):
+                self.teacher_eval.update_kl_metrics(out, data, split, self.metrics)
+            with prof.cuda(f"ngram_kl_{split}"):
+                for ne in self.ngram_evals.values():
+                    ne.update_kl(out, data, split, self.metrics)
+            with prof.cuda(f"teacher_true_loss_{split}"):
+                true_loss = self.teacher_eval.true_loss(out, data, self.loss_fn)
             self.metrics[f"student/{split}_true_loss"].update(
                 true_loss.item(), data.size(0)
             )
@@ -242,10 +251,12 @@ class Trainer(ABC):
 
     def _val_loop(self, step: int) -> None:
         self.student.eval()
+        prof = get_profiler()
         attn_batches: List[torch.Tensor] = []
         for data in self.val_loader:
             with torch.no_grad():
-                data = data.to(self.device)
+                with prof.cuda("data_to_device_val"):
+                    data = data.to(self.device)
                 _, _, _, attn_weights = self._forward_and_metrics(data, split="val")
                 attn_batches.append(attn_weights)
         self.attention_logger.log(step, "val", attn_batches)

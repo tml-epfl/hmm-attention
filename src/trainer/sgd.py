@@ -2,6 +2,7 @@ from typing import Tuple
 
 import torch
 
+from src.profiling import get_profiler
 from src.trainer.base import Trainer
 
 
@@ -15,26 +16,31 @@ class SGDTrainer(Trainer):
     def _train_step(
         self, data: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        prof = get_profiler()
         self.student.zero_grad()
         self.optimizer.zero_grad()
         out, target, loss, attn_weights = self._forward_and_metrics(data, split="train")
-        loss.backward()
+        with prof.cuda("student_backward"):
+            loss.backward()
         if self.max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(
                 self.student.parameters(), self.max_grad_norm
             )
-        self.optimizer.step()
+        with prof.cuda("optimizer_step"):
+            self.optimizer.step()
         return out, target, loss, attn_weights
 
     def _train_loop(self) -> None:
         self._clear_aux_metrics()
         self.student.train()
         self.teacher.eval()
+        prof = get_profiler()
 
         for data in self.train_loader:
             if self.current_step >= self.steps:
                 break
-            data = data.to(self.device)
+            with prof.cuda("data_to_device_train"):
+                data = data.to(self.device)
             _, _, _, attn_weights = self._train_step(data)
 
             self._update_lr_sched(self.lr_metric.compute(), epoch_end=False)
@@ -49,7 +55,8 @@ class SGDTrainer(Trainer):
             self.metrics["student/grad_norm"].update(grad_norm.item(), data.shape[0])
 
             self.attention_logger.log(self.current_step, "train", [attn_weights])
-            self._val_loop(self.current_step)
+            with prof.cuda("val_loop"):
+                self._val_loop(self.current_step)
             self._end_step(self.current_step, step_time=None, ngram=False)
             self.current_step += 1
             if self.current_step >= self.steps:
