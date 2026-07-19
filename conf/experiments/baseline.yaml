@@ -1,8 +1,6 @@
 # @package _global_
 
 defaults:
-  - /train
-  - override /experiments: null
   - _self_
 
 teacher:

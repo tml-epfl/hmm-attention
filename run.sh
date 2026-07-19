@@ -12,4 +12,4 @@ if [ $# -eq 0 ]; then
 fi
 
 # Run the experiment
-python train.py --config-name=experiments/$1 --multirun
+python train.py experiments=$1 --multirun "${@:2}"
