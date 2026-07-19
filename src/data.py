@@ -55,6 +55,14 @@ class ARDataset(Dataset):
         indices = torch.randint(0, self.dim, (length,))
         return F.one_hot(indices, num_classes=self.dim).float()
 
+    def _burn_in_batch(self, batch_size: int, length: int) -> torch.Tensor:
+        """Batched predictor-specific burn-in, else uniform one-hot fallback."""
+        custom = self.predictor.random_burn_in_batch(batch_size, length)
+        if custom is not None:
+            return custom
+        indices = torch.randint(0, self.dim, (batch_size, length))
+        return F.one_hot(indices, num_classes=self.dim).float()
+
     def _generate_seq(self, length: int) -> torch.Tensor:
         seq = torch.zeros((self.prefix_length + length, self.dim))
         seq[: self.prefix_length, :] = self._burn_in(self.prefix_length)
@@ -63,14 +71,24 @@ class ARDataset(Dataset):
         return seq
 
     def _generate(self, number: int, length: int) -> torch.Tensor:
-        iterator = tqdm.trange(
-            number,
-            desc=f"Generating {number}x len={self.prefix_length + length}",
+        """Batched dataset generation: one teacher forward per position across
+        all `number` sequences simultaneously, instead of `number` independent
+        Python loops.
+        """
+        total_len = self.prefix_length + length
+        seq = torch.zeros((number, total_len, self.dim))
+        seq[:, : self.prefix_length, :] = self._burn_in_batch(number, self.prefix_length)
+        pbar = tqdm.trange(
+            self.prefix_length,
+            total_len,
+            desc=f"Generating {number}x len={total_len}",
             leave=False,
-            unit="seq",
+            unit="pos",
             disable=number < 4,
         )
-        return torch.stack([self._generate_seq(length) for _ in iterator])
+        for i in pbar:
+            seq[:, i, :] = self.predictor.sample_next_batch(seq[:, :i, :])
+        return seq
 
     def __len__(self) -> int:
         return self.number

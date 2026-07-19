@@ -16,14 +16,15 @@ def get_loaders(
     """Build train + val DataLoaders.
 
     Mutates `dataset_cfg` (strips `number`) and `trainer_cfg` (strips
-    `batch_size`, `replacement`) so downstream Hydra instantiation of the
-    trainer does not receive fields it doesn't accept.
+    `batch_size`, `replacement`, `num_workers`) so downstream Hydra
+    instantiation of the trainer does not receive fields it doesn't accept.
     """
     batch_size = (
         dataset_cfg.number.train
         if trainer_cfg.batch_size == -1
         else trainer_cfg.batch_size
     )
+    num_workers = trainer_cfg.get("num_workers", 0)
 
     train_size = dataset_cfg.number.train
     val_size = dataset_cfg.number.val
@@ -49,19 +50,24 @@ def get_loaders(
     train_sampler = RandomSampler(
         train_dataset, replacement=trainer_cfg.replacement, num_samples=abs(train_size)
     )
-    train_loader = DataLoader(
-        train_dataset, sampler=train_sampler, batch_size=batch_size
-    )
+    loader_kwargs = {"batch_size": batch_size, "pin_memory": True}
+    if num_workers > 0:
+        loader_kwargs.update(
+            num_workers=num_workers,
+            prefetch_factor=2,
+            persistent_workers=True,
+        )
+    train_loader = DataLoader(train_dataset, sampler=train_sampler, **loader_kwargs)
     val_sampler = RandomSampler(
         val_dataset,
         replacement=False,
         num_samples=abs(train_size if val_size == 0 else val_size),
     )
-    val_loader = DataLoader(
-        val_dataset, sampler=val_sampler, batch_size=batch_size
-    )
+    val_loader = DataLoader(val_dataset, sampler=val_sampler, **loader_kwargs)
 
     del trainer_cfg.batch_size, trainer_cfg.replacement
+    if "num_workers" in trainer_cfg:
+        del trainer_cfg.num_workers
     return train_loader, val_loader
 
 

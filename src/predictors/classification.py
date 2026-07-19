@@ -46,6 +46,14 @@ class ClassificationPredictor(Predictor):
             log_probs = self.teacher.predict_next(x)  # (1, dim)
             return log_probs.squeeze(0).to(prefix.device)
 
+    def _teacher_log_probs_batch(self, prefix: torch.Tensor) -> torch.Tensor:
+        """Batched next-token log-probs: (B, T, dim) -> (B, dim), returned on
+        `prefix.device`. Runs the teacher once on the whole batch."""
+        with torch.no_grad():
+            device = next(self.teacher.parameters()).device
+            log_probs = self.teacher.predict_next(prefix.to(device))
+            return log_probs.to(prefix.device)
+
     def distribution(self, prefix: torch.Tensor) -> Categorical:
         # Categorical treats `logits` as unnormalized log-probs; log-probs are
         # already normalized log-probs (a special case), so this is correct.
@@ -53,6 +61,16 @@ class ClassificationPredictor(Predictor):
 
     def sample_next(self, prefix: torch.Tensor) -> torch.Tensor:
         log_probs = self._teacher_log_probs(prefix)
+        if self.argmax:
+            idx = log_probs.argmax(dim=-1)
+        else:
+            idx = torch.multinomial(log_probs.exp(), num_samples=1).squeeze(-1)
+        return F.one_hot(idx, num_classes=self.dim).to(prefix.dtype)
+
+    def sample_next_batch(self, prefix: torch.Tensor) -> torch.Tensor:
+        """Batched sampler: (B, T, dim) -> (B, dim). One teacher forward,
+        one multinomial draw per batch element."""
+        log_probs = self._teacher_log_probs_batch(prefix)  # (B, dim)
         if self.argmax:
             idx = log_probs.argmax(dim=-1)
         else:
@@ -81,3 +99,22 @@ class HierarchicalPredictor(ClassificationPredictor):
         chunks (decoding to real hidden ids rather than the argmax=0 fallback)."""
         device = next(self.teacher.parameters()).device
         return self.teacher.sample_surface_prefix(length, device=device).cpu()
+
+    def random_burn_in_batch(
+        self, batch_size: int, length: int
+    ) -> Optional[torch.Tensor]:
+        """Vectorized version of `random_burn_in`: draw `batch_size * n_hidden`
+        hidden ids in one shot and look them up in the chunk table."""
+        if length % self.teacher.chunk_size != 0:
+            raise ValueError(
+                f"burn-in length ({length}) must be a multiple of "
+                f"chunk_size ({self.teacher.chunk_size})"
+            )
+        device = next(self.teacher.parameters()).device
+        table = self.teacher._chunk_table.to(device)
+        n_hidden = length // self.teacher.chunk_size
+        hidden_ids = torch.randint(
+            0, self.teacher.hidden_dim, (batch_size, n_hidden), device=device
+        )
+        chunks = table[hidden_ids]  # (B, n_hidden, chunk_size, chunk_dim)
+        return chunks.reshape(batch_size, length, self.teacher.chunk_dim).cpu()

@@ -4,3 +4,4 @@ ngram_steps: 0 # disable n-gram training
 batch_size: 3000
 replacement: False
 max_grad_norm: 1.0
+num_workers: 0 # DataLoader workers. >0 only helps when __getitem__ regenerates (dataset.number<0).
