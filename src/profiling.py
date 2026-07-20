@@ -99,10 +99,11 @@ _singleton: Optional[Profiler] = None
 
 
 def get_profiler() -> Profiler:
+    """Singleton profiler. Enabled by default; set `HMM_PROFILE=0` to disable."""
     global _singleton
     if _singleton is None:
-        flag = os.environ.get("HMM_PROFILE", "0")
-        enabled = flag not in ("", "0", "false", "False")
+        flag = os.environ.get("HMM_PROFILE", "1").lower()
+        enabled = flag not in ("0", "false", "no", "")
         _singleton = Profiler(enabled=enabled)
     return _singleton
 

@@ -6,6 +6,8 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader, RandomSampler
 
+from src.data import ar_batch_collate
+
 
 def get_loaders(
     dataset_cfg: DictConfig,
@@ -50,7 +52,11 @@ def get_loaders(
     train_sampler = RandomSampler(
         train_dataset, replacement=trainer_cfg.replacement, num_samples=abs(train_size)
     )
-    loader_kwargs = {"batch_size": batch_size, "pin_memory": True}
+    loader_kwargs = {
+        "batch_size": batch_size,
+        "pin_memory": True,
+        "collate_fn": ar_batch_collate,
+    }
     if num_workers > 0:
         loader_kwargs.update(
             num_workers=num_workers,

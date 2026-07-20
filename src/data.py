@@ -1,3 +1,5 @@
+from typing import List
+
 import torch
 import torch.nn.functional as F
 import tqdm
@@ -6,6 +8,13 @@ from torch.utils.data import Dataset
 from src.predictors import Predictor
 from src.profiling import get_profiler
 from src.utils import split_into_windows
+
+
+def ar_batch_collate(batch: torch.Tensor) -> torch.Tensor:
+    """Passthrough collate: ARDataset.__getitems__ already returns a stacked
+    (B, T, D) tensor. Default collate would iterate the tensor row-by-row and
+    re-stack — wasted memcpy at large B."""
+    return batch
 
 
 class ARDataset(Dataset):
@@ -44,8 +53,12 @@ class ARDataset(Dataset):
         self.unroll_sequences = unroll_sequences
         self.refresh_sequences = number < 0
         self.prefix_length = prefix_length
-        with get_profiler().cuda("dataset_init"):
-            self.data = self._generate(self.number, self.length)
+        if self.refresh_sequences:
+            # Pure lazy: no cache — every fetch regenerates.
+            self.data = None
+        else:
+            with get_profiler().cuda("dataset_init"):
+                self.data = self._generate(self.number, self.length)
 
     def _burn_in(self, length: int) -> torch.Tensor:
         """Predictor-specific burn-in if available, else uniform one-hot fallback."""
@@ -95,10 +108,30 @@ class ARDataset(Dataset):
 
     def __getitem__(self, index: int) -> torch.Tensor:
         if self.refresh_sequences:
-            self.data[index : index + 1, ...] = self._generate(1, self.length)
+            with get_profiler().cuda("sample_batch"):
+                seq = self._generate(1, self.length)[0]
+        else:
+            seq = self.data[index]
 
         if self.unroll_sequences:
-            return split_into_windows(
-                torch.unsqueeze(self.data[index, ...], dim=0), self.window
-            )
-        return self.data[index, ...]
+            return split_into_windows(torch.unsqueeze(seq, dim=0), self.window)
+        return seq
+
+    def __getitems__(self, indices: List[int]) -> torch.Tensor:
+        """Batched fetch (PyTorch DataLoader hook, ≥1.11).
+
+        In refresh mode this replaces `len(indices)` independent per-token
+        teacher forwards with one batched forward per position — the same
+        speedup as init-time batched generation. Must be paired with a
+        passthrough `collate_fn` (see `ar_batch_collate`) so the returned
+        (B, T, D) tensor isn't torn apart and re-stacked by default collate.
+        """
+        if self.refresh_sequences:
+            with get_profiler().cuda("sample_batch"):
+                batch = self._generate(len(indices), self.length)
+        else:
+            batch = self.data[indices]
+
+        if self.unroll_sequences:
+            return split_into_windows(batch, self.window)
+        return batch

@@ -87,7 +87,10 @@ class Trainer(ABC):
             f"Finished training! Total time: {(time.time() - start) / 3600:.2f}h"
         )
         prof = get_profiler()
-        if prof.enabled:
+        if prof.enabled and self.logging_cfg.writer is None:
+            # Terminal dump of the full run when wandb is off. With wandb on,
+            # per-window means are already streamed via `profile/*_ms` and
+            # `_write_to_wandb` resets the accumulator each log step.
             self.logger.info("Profiler report:\n" + format_report(prof.report()))
 
     # --- LR scheduler ---
@@ -350,6 +353,16 @@ class Trainer(ABC):
         log_metrics["system/learning_rate"] = (
             self.scheduler_cfg.scheduler.get_last_lr()[0]
         )
+        # Profiler snapshot — per-window stats since the last log, then reset.
+        # `_calls` matters because mean alone hides "cheap-but-frequent" vs
+        # "expensive-but-rare"; `_total_ms` is the direct contribution to wall
+        # time (mean × calls).
+        prof = get_profiler()
+        if prof.enabled:
+            for section, stats in prof.report(reset=True).items():
+                log_metrics[f"profile/{section}/ms"] = stats["mean_ms"]
+                log_metrics[f"profile/{section}/calls"] = stats["count"]
+                log_metrics[f"profile/{section}/total_ms"] = stats["total_ms"]
         self.logging_cfg.writer.log(log_metrics, step=step)
 
     def _write_to_json(self, path: str, epoch: int) -> None:
