@@ -12,12 +12,16 @@ class HierarchicalTeacher(ARTeacher):
     """Wraps a base ARTeacher and exposes a surface-space interface.
 
     The base teacher operates over a hidden vocabulary of size `base_teacher.dim`.
-    Each hidden token id maps, via a deterministic invertible permutation table,
-    to a length-`chunk_size` sequence of one-hot vectors of dimension `chunk_dim`.
-    This wrapper accepts surface-space tensors, decodes chunk-aligned inputs to
-    hidden tokens, runs the base teacher, and re-emits per-surface-slot predictions
-    using a marginal-with-compatibility computation that correctly handles
-    mid-chunk positions.
+    Each hidden token id maps to `num_tuples` (M) distinct length-`chunk_size`
+    surface tuples — one-hot sequences of dimension `chunk_dim` — via a chunk
+    table with globally disjoint supports across (hidden_id, tuple_idx). Because
+    supports are disjoint, any complete chunk uniquely identifies its hidden id,
+    so surface→hidden decoding remains deterministic even with M > 1.
+
+    The forward direction (hidden→surface) is stochastic when M > 1: each hidden
+    token uniformly draws one of its M tuples. Next-slot prediction therefore
+    marginalizes over both the hidden posterior *and* the within-hidden tuple
+    posterior conditioned on any observed slots of the current chunk.
 
     Distribution sharpness is encoded in the base teacher's weight scale (see
     `LinearARTeacher.from_parameters(scale=...)`) — there is no temperature knob
@@ -30,6 +34,7 @@ class HierarchicalTeacher(ARTeacher):
         base_teacher: ARTeacher,
         chunk_dim: int,
         chunk_size: int,
+        num_tuples: int = 1,
         chunk_seed: Optional[int] = None,
         chunk_table: Optional[torch.Tensor] = None,
     ) -> None:
@@ -38,10 +43,13 @@ class HierarchicalTeacher(ARTeacher):
             raise ValueError("chunk_size must be a positive integer.")
         if chunk_size > chunk_dim:
             raise ValueError("chunk_size cannot exceed chunk_dim.")
+        if num_tuples <= 0:
+            raise ValueError("num_tuples must be a positive integer.")
 
         self.base_teacher = base_teacher
         self.chunk_dim = chunk_dim
         self.chunk_size = chunk_size
+        self.num_tuples = num_tuples
 
         if chunk_table is None:
             generator = None
@@ -49,7 +57,7 @@ class HierarchicalTeacher(ARTeacher):
                 generator = torch.Generator().manual_seed(int(chunk_seed))
             chunk_table = self._generate_unique_chunks(generator=generator)
         else:
-            expected = (self.hidden_dim, chunk_size, chunk_dim)
+            expected = (self.hidden_dim, num_tuples, chunk_size, chunk_dim)
             if tuple(chunk_table.shape) != expected:
                 raise ValueError(
                     f"chunk_table shape {tuple(chunk_table.shape)} != expected {expected}"
@@ -206,6 +214,7 @@ class HierarchicalTeacher(ARTeacher):
             base_teacher=restricted_base,
             chunk_dim=self.chunk_dim,
             chunk_size=self.chunk_size,
+            num_tuples=self.num_tuples,
             chunk_table=self._chunk_table,
         )
 
@@ -213,35 +222,45 @@ class HierarchicalTeacher(ARTeacher):
     def _generate_unique_chunks(
         self, generator: Optional[torch.Generator] = None
     ) -> torch.Tensor:
+        needed = self.hidden_dim * self.num_tuples
         total_permutations = math.perm(self.chunk_dim, self.chunk_size)
-        if total_permutations < self.hidden_dim:
+        if total_permutations < needed:
             raise ValueError(
-                "Not enough unique chunk permutations to cover all hidden tokens. "
-                f"Need {self.hidden_dim}, but only {total_permutations} available."
+                "Not enough unique chunk permutations to cover all hidden tokens "
+                f"with {self.num_tuples} tuples each. "
+                f"Need {needed}, but only {total_permutations} available."
             )
 
-        chunks = torch.zeros(self.hidden_dim, self.chunk_size, self.chunk_dim)
+        chunks = torch.zeros(
+            self.hidden_dim, self.num_tuples, self.chunk_size, self.chunk_dim
+        )
         used: set = set()
         for hid in range(self.hidden_dim):
-            for _ in range(1000):
-                indices = torch.randperm(self.chunk_dim, generator=generator)[
-                    : self.chunk_size
-                ]
-                signature = tuple(indices.tolist())
-                if signature not in used:
-                    used.add(signature)
-                    chunk = torch.zeros(self.chunk_size, self.chunk_dim)
-                    chunk[torch.arange(self.chunk_size), indices] = 1.0
-                    chunks[hid] = chunk
-                    break
-            else:
-                raise RuntimeError(
-                    "Failed to sample a unique chunk sequence after many attempts."
-                )
+            for m in range(self.num_tuples):
+                for _ in range(1000):
+                    indices = torch.randperm(self.chunk_dim, generator=generator)[
+                        : self.chunk_size
+                    ]
+                    signature = tuple(indices.tolist())
+                    if signature not in used:
+                        used.add(signature)
+                        chunk = torch.zeros(self.chunk_size, self.chunk_dim)
+                        chunk[torch.arange(self.chunk_size), indices] = 1.0
+                        chunks[hid, m] = chunk
+                        break
+                else:
+                    raise RuntimeError(
+                        "Failed to sample a unique chunk sequence after many attempts."
+                    )
         return chunks
 
     def _decode_chunk_aligned(self, surface: torch.Tensor) -> torch.Tensor:
-        """(..., L_h * chunk_size, chunk_dim) -> (..., L_h, hidden_dim) one-hot."""
+        """(..., L_h * chunk_size, chunk_dim) -> (..., L_h, hidden_dim) one-hot.
+
+        With num_tuples > 1, matches the observed slot sequence against any of
+        the M tuples per hidden id. Supports are globally disjoint, so exactly
+        one (hidden_id, tuple_idx) can match a valid input.
+        """
         *lead, l_surf, cd = surface.shape
         if cd != self.chunk_dim:
             raise ValueError(f"Trailing dim {cd} != chunk_dim {self.chunk_dim}")
@@ -252,24 +271,33 @@ class HierarchicalTeacher(ARTeacher):
         l_h = l_surf // self.chunk_size
         chunks = surface.reshape(*lead, l_h, self.chunk_size, self.chunk_dim)
         slot_idx = chunks.argmax(dim=-1)  # (..., L_h, chunk_size)
-        matches = (slot_idx.unsqueeze(-2) == self._chunk_slot_indices).all(dim=-1)
-        hidden_ids = matches.float().argmax(dim=-1)
+        # table: (hidden_dim, M, chunk_size); expand slot_idx to (..., L_h, 1, 1, chunk_size)
+        matches = (
+            slot_idx.unsqueeze(-2).unsqueeze(-2) == self._chunk_slot_indices
+        ).all(dim=-1)  # (..., L_h, hidden_dim, M)
+        flat = matches.reshape(*matches.shape[:-2], self.hidden_dim * self.num_tuples)
+        hidden_ids = flat.float().argmax(dim=-1) // self.num_tuples
         return F.one_hot(hidden_ids, num_classes=self.hidden_dim).to(surface.dtype)
 
     def _compat_mask(
         self, observed_slots: torch.Tensor, num_observed: int
     ) -> torch.Tensor:
-        """Compatibility mask over hidden ids given leading `num_observed` slots."""
+        """Compatibility mask over (hidden_id, tuple_idx) given leading slots.
+
+        Returns shape (..., hidden_dim, num_tuples). Entry (h, m) is 1 iff
+        `_chunk_slot_indices[h, m, :num_observed] == observed_slots[..., :num_observed]`.
+        For num_observed == 0, all entries are 1.
+        """
+        lead_shape = observed_slots.shape[:-1]
         if num_observed == 0:
-            lead_shape = observed_slots.shape[:-1]
             return torch.ones(
-                (*lead_shape, self.hidden_dim),
+                (*lead_shape, self.hidden_dim, self.num_tuples),
                 device=observed_slots.device,
                 dtype=torch.float,
             )
-        obs = observed_slots[..., :num_observed]
-        table = self._chunk_slot_indices[:, :num_observed]
-        matches = (obs.unsqueeze(-2) == table).all(dim=-1)
+        obs = observed_slots[..., :num_observed]  # (..., num_observed)
+        table = self._chunk_slot_indices[:, :, :num_observed]  # (hidden_dim, M, num_observed)
+        matches = (obs.unsqueeze(-2).unsqueeze(-2) == table).all(dim=-1)  # (..., hidden_dim, M)
         return matches.to(torch.float)
 
     def _hidden_probs_to_surface_logprobs(
@@ -279,14 +307,22 @@ class HierarchicalTeacher(ARTeacher):
         num_observed: int,
         slot_to_predict: int,
     ) -> torch.Tensor:
-        """Filter hidden probs by compat, mix through chunk table, return log-probs."""
-        p = hidden_log_probs.exp()
-        compat = self._compat_mask(observed_slots, num_observed)
-        p_posterior = p * compat
-        norm = p_posterior.sum(dim=-1, keepdim=True).clamp(min=1e-30)
+        """Marginalize over (hidden_id, tuple_idx) to get surface log-probs.
+
+        Uses a uniform 1/M prior over tuples per hidden id. Compatibility
+        filtering conditions the posterior on the observed slot prefix; the
+        result is mixed through the chunk table at `slot_to_predict`.
+        """
+        p_h = hidden_log_probs.exp()  # (..., hidden_dim)
+        # Uniform tuple prior 1/M; broadcast into (..., hidden_dim, M)
+        p_hm = p_h.unsqueeze(-1) / self.num_tuples
+        compat = self._compat_mask(observed_slots, num_observed)  # (..., hidden_dim, M)
+        p_posterior = p_hm * compat
+        norm = p_posterior.sum(dim=(-1, -2), keepdim=True).clamp(min=1e-30)
         p_posterior = p_posterior / norm
-        slot_table = self._chunk_table[:, slot_to_predict, :]  # (hidden_dim, chunk_dim)
-        surface_probs = p_posterior @ slot_table
+        # chunk_table[:, :, slot_to_predict, :] -> (hidden_dim, M, chunk_dim)
+        slot_table = self._chunk_table[:, :, slot_to_predict, :]
+        surface_probs = torch.einsum("...hm,hmd->...d", p_posterior, slot_table)
         return surface_probs.clamp(min=1e-30).log()
 
     def sample_surface_prefix(
@@ -311,5 +347,8 @@ class HierarchicalTeacher(ARTeacher):
         hidden_ids = torch.randint(
             0, self.hidden_dim, (n_hidden,), device=table.device
         )
-        chunks = table[hidden_ids]  # (n_hidden, chunk_size, chunk_dim)
+        tuple_ids = torch.randint(
+            0, self.num_tuples, (n_hidden,), device=table.device
+        )
+        chunks = table[hidden_ids, tuple_ids]  # (n_hidden, chunk_size, chunk_dim)
         return chunks.reshape(num_surface_tokens, self.chunk_dim)

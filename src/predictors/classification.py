@@ -116,5 +116,8 @@ class HierarchicalPredictor(ClassificationPredictor):
         hidden_ids = torch.randint(
             0, self.teacher.hidden_dim, (batch_size, n_hidden), device=device
         )
-        chunks = table[hidden_ids]  # (B, n_hidden, chunk_size, chunk_dim)
+        tuple_ids = torch.randint(
+            0, self.teacher.num_tuples, (batch_size, n_hidden), device=device
+        )
+        chunks = table[hidden_ids, tuple_ids]  # (B, n_hidden, chunk_size, chunk_dim)
         return chunks.reshape(batch_size, length, self.teacher.chunk_dim).cpu()
