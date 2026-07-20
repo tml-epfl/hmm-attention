@@ -10,7 +10,7 @@ import pytest
 import torch
 from torch.utils.data import DataLoader
 
-from src.data import ARDataset
+from src.data import ARDataset, ar_batch_collate
 from src.predictors import (
     ClassificationPredictor,
     HierarchicalPredictor,
@@ -93,8 +93,8 @@ def tiny_dataset(tiny_predictor: ClassificationPredictor) -> ARDataset:
 
 @pytest.fixture()
 def tiny_loaders(tiny_dataset: ARDataset) -> Tuple[DataLoader, DataLoader]:
-    train_loader = DataLoader(tiny_dataset, batch_size=4)
-    val_loader = DataLoader(tiny_dataset, batch_size=4)
+    train_loader = DataLoader(tiny_dataset, batch_size=4, collate_fn=ar_batch_collate)
+    val_loader = DataLoader(tiny_dataset, batch_size=4, collate_fn=ar_batch_collate)
     return train_loader, val_loader
 
 

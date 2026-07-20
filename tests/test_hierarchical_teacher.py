@@ -54,20 +54,20 @@ def test_hierarchical_teacher():
     _hr("CHUNK TABLE (hidden id -> chunk slot indices)")
     print("       slot0  slot1")
     for hid in range(hidden_dim):
-        s0, s1 = ht._chunk_slot_indices[hid].tolist()
+        s0, s1 = ht._chunk_slot_indices[hid, 0].tolist()
         print(f"  h={hid}:   {s0:>3}    {s1:>3}")
     # Slot-0 collisions: which hidden ids share slot-0 value?
     from collections import defaultdict
     slot0_groups: defaultdict = defaultdict(list)
     for hid in range(hidden_dim):
-        slot0_groups[int(ht._chunk_slot_indices[hid, 0])].append(hid)
+        slot0_groups[int(ht._chunk_slot_indices[hid, 0, 0])].append(hid)
     collisions = {v: ids for v, ids in slot0_groups.items() if len(ids) > 1}
     print(f"slot-0 collisions: {dict(collisions) if collisions else 'none — every slot-0 value is unique'}")
 
     # ---- 1. chunk table invertibility ----
     _hr("[1] CHUNK TABLE INVERTIBILITY")
     hidden_ids = torch.arange(hidden_dim)
-    surface = ht._chunk_table[hidden_ids]
+    surface = ht._chunk_table[hidden_ids, 0]  # M=1, so tuple index 0
     surface_flat = surface.reshape(1, hidden_dim * chunk_size, chunk_dim)
     decoded = ht._decode_chunk_aligned(surface_flat)
     decoded_ids = decoded.argmax(dim=-1).squeeze(0)
@@ -93,7 +93,7 @@ def test_hierarchical_teacher():
 
     hidden_ids_batched = hidden.argmax(dim=-1)  # (B, L_h)
     L_surf = L_h * chunk_size
-    surface_full = ht._chunk_table[hidden_ids_batched]
+    surface_full = ht._chunk_table[hidden_ids_batched, 0]  # M=1
     surface_full = surface_full.reshape(B, L_surf, chunk_dim)
     surface_slot_ids = surface_full.argmax(dim=-1)  # (B, L_surf)
 
@@ -150,7 +150,7 @@ def test_hierarchical_teacher():
     with torch.no_grad():
         base_log_probs, _ = base.unroll(hidden, return_targets=True)
     base_argmax_h = base_log_probs.argmax(dim=-1)  # (B, L_out_h)
-    expected_slot0 = ht._chunk_slot_indices[base_argmax_h, 0]
+    expected_slot0 = ht._chunk_slot_indices[base_argmax_h, 0, 0]  # (h, tuple=0, slot=0)
 
     slot0_positions = torch.arange(0, L_out, chunk_size)
     wrapper_slot0 = pred_ids[:, slot0_positions]
@@ -158,7 +158,7 @@ def test_hierarchical_teacher():
     print("  chunk | base argmax_h | chunk_table[h,0] | wrapper argmax | target slot0")
     for k in range(L_out_h):
         h_star = int(base_argmax_h[0, k])
-        exp0 = int(ht._chunk_slot_indices[h_star, 0])
+        exp0 = int(ht._chunk_slot_indices[h_star, 0, 0])
         wrap = int(wrapper_slot0[0, k])
         tgt = int(target_ids[0, k * chunk_size])
         marker = "✓" if wrap == exp0 == tgt else ("~" if wrap == exp0 else "✗")
@@ -186,3 +186,134 @@ def test_hierarchical_teacher():
         assert max_diff < 1e-4, f"[FAIL] AR/unrolled mismatch at boundary {boundary}: {max_diff}"
 
     print("\n[ALL PASS]")
+
+
+def test_hierarchical_teacher_stochastic():
+    """M > 1: disjoint supports, deterministic surface->hidden, stochastic hidden->surface.
+
+    Checks:
+      1. All hidden_dim * M tuples are distinct (globally disjoint supports).
+      2. Any tuple in the table decodes back to its owning hidden id.
+      3. Given a full completed chunk of hidden id h, the next-chunk slot-0
+         marginal is a 1/M mixture over `chunk_table[h_next, m, 0, :]`
+         when the base teacher is confident about h_next.
+      4. Once slot 0 of the next chunk is observed and it uniquely identifies
+         a single (h, m), the slot-1 prediction is a delta on that tuple's slot 1.
+      5. AR path matches unrolled path at chunk-aligned positions.
+    """
+    torch.manual_seed(1)
+    hidden_dim = 6
+    chunk_dim = 8
+    chunk_size = 2
+    num_tuples = 3
+    window = 3
+    span_lengths = [1, 1, 1]
+
+    base = LinearARTeacher.from_parameters(
+        dim=hidden_dim,
+        span_lengths=span_lengths,
+        rank=hidden_dim,
+        window=window,
+        multiplicative_constant=1.7,
+        scale=10.0,
+    )
+    ht = HierarchicalTeacher(
+        base_teacher=base,
+        chunk_dim=chunk_dim,
+        chunk_size=chunk_size,
+        num_tuples=num_tuples,
+        chunk_seed=0,
+    )
+
+    _hr("STOCHASTIC SETUP")
+    print(f"hidden_dim={hidden_dim}, chunk_dim={chunk_dim}, chunk_size={chunk_size}, M={num_tuples}")
+    assert ht._chunk_table.shape == (hidden_dim, num_tuples, chunk_size, chunk_dim)
+
+    # ---- 1. globally disjoint supports ----
+    _hr("[S1] GLOBAL DISJOINTNESS")
+    sigs = ht._chunk_slot_indices.reshape(-1, chunk_size).tolist()
+    sig_set = {tuple(s) for s in sigs}
+    print(f"total tuples: {len(sigs)}, unique: {len(sig_set)}")
+    assert len(sig_set) == len(sigs), "[FAIL] tuples not globally disjoint"
+
+    # ---- 2. surface->hidden deterministic under M>1 ----
+    _hr("[S2] SURFACE -> HIDDEN DECODE")
+    # For each (h, m), the tuple should decode back to h.
+    all_chunks = ht._chunk_table.reshape(hidden_dim * num_tuples, chunk_size, chunk_dim)
+    surface_flat = all_chunks.reshape(1, hidden_dim * num_tuples * chunk_size, chunk_dim)
+    decoded = ht._decode_chunk_aligned(surface_flat).argmax(dim=-1).squeeze(0)
+    expected = torch.arange(hidden_dim).repeat_interleave(num_tuples)
+    print(f"decoded: {decoded.tolist()}")
+    print(f"expected: {expected.tolist()}")
+    assert torch.equal(decoded, expected), "[FAIL] decode mismatch under M>1"
+
+    # ---- 3. slot-0 marginal is a mixture over M tuples ----
+    _hr("[S3] SLOT-0 IS AN M-WAY MIXTURE (spread over multiple surface ids)")
+    B = 4
+    L_h = 8
+    hidden = torch.zeros(B, L_h, hidden_dim)
+    prefix_ids = torch.randint(0, hidden_dim, (B, window))
+    hidden[:, :window, :] = F.one_hot(prefix_ids, num_classes=hidden_dim).float()
+    for i in range(window, L_h):
+        ctx = hidden[:, i - window : i, :]
+        next_ids = base.next_token_log_probs(ctx).argmax(dim=-1)
+        hidden[:, i, :] = F.one_hot(next_ids, num_classes=hidden_dim).float()
+
+    hidden_ids_batched = hidden.argmax(dim=-1)
+    # Choose tuple m uniformly to build the actual surface stream.
+    tuple_ids = torch.randint(0, num_tuples, (B, L_h))
+    surface_full = ht._chunk_table[hidden_ids_batched, tuple_ids]  # (B, L_h, chunk_size, chunk_dim)
+    surface_full = surface_full.reshape(B, L_h * chunk_size, chunk_dim)
+
+    with torch.no_grad():
+        log_probs, targets = ht.unroll(surface_full, return_targets=True)
+    surface_probs = log_probs.exp()
+
+    prob_sums = surface_probs.sum(dim=-1)
+    assert torch.allclose(prob_sums, torch.ones_like(prob_sums), atol=1e-4), (
+        "[FAIL] stochastic surface probs don't sum to 1"
+    )
+
+    # Slot-0 marginal must NOT be a delta — with M > 1 tuples per hidden id
+    # (each with a distinct slot-0), even a confident hidden posterior yields
+    # a mixture. Check that top-prob is bounded and support size >= 2.
+    L_out = log_probs.shape[1]
+    slot0_positions = torch.arange(0, L_out, chunk_size)
+    slot0_top = surface_probs[:, slot0_positions].max(dim=-1).values  # (B, n)
+    print(f"slot-0 top-prob: min={slot0_top.min():.4f}  mean={slot0_top.mean():.4f}")
+    assert slot0_top.mean().item() < 0.9, (
+        "[FAIL] slot-0 marginal collapsed to a near-delta — M-way mixture missing"
+    )
+    supp_sizes = (surface_probs[:, slot0_positions] > 1e-3).sum(dim=-1).float()
+    print(f"slot-0 support size: min={int(supp_sizes.min())}  mean={supp_sizes.mean():.2f}")
+    assert supp_sizes.min().item() >= 2, "[FAIL] slot-0 support size < 2 somewhere"
+
+    # ---- 4. slot-1 becomes deterministic once slot 0 is observed ----
+    _hr("[S4] SLOT-1 IS A DELTA GIVEN OBSERVED SLOT 0")
+    L_out = log_probs.shape[1]
+    slot1_positions = torch.arange(1, L_out, chunk_size)
+    slot1_top = surface_probs[:, slot1_positions].max(dim=-1).values
+    print(f"slot-1 max prob: min={slot1_top.min():.4f}  mean={slot1_top.mean():.4f}")
+    # Because supports are globally disjoint, observing slot 0 pins down (h, m)
+    # up to at most as many (h, m) as share that slot-0 value; with confident h
+    # and disjoint tuples, we expect near-1.
+    slot1_pred = surface_probs[:, slot1_positions].argmax(dim=-1)
+    slot1_targ = targets[:, slot1_positions].argmax(dim=-1)
+    slot1_acc = (slot1_pred == slot1_targ).float().mean().item()
+    print(f"slot-1 accuracy: {slot1_acc:.4f}")
+    assert slot1_acc > 0.95, f"[FAIL] slot-1 accuracy {slot1_acc:.3f} < 0.95"
+
+    # ---- 5. AR vs unrolled consistency ----
+    _hr("[S5] AR vs UNROLLED CONSISTENCY")
+    b = 0
+    for k in range(3):
+        boundary = (window + k) * chunk_size
+        pref = surface_full[b : b + 1, :boundary, :]
+        with torch.no_grad():
+            ar_out = ht.predict_next(pref)
+        unrolled_pred = log_probs[b, k * chunk_size]
+        max_diff = (ar_out.squeeze(0) - unrolled_pred).abs().max().item()
+        print(f"boundary {boundary}: max|diff| = {max_diff:.3e}")
+        assert max_diff < 1e-4, f"[FAIL] AR/unrolled mismatch at boundary {boundary}: {max_diff}"
+
+    print("\n[STOCHASTIC ALL PASS]")
