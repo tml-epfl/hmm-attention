@@ -19,7 +19,13 @@ teacher:
 dataset:
   window: 3
   dim: 64                          # surface vocab (= chunk_dim)
-  length: 40                       # 20 hidden * chunk_size(2) surface tokens
+  length: 20                       # 10 hidden * chunk_size(2) surface tokens
+  number:
+    train: -15000
+
+trainer:
+  batch_size: 15000
+  steps: 100000
 
 student:
   dim: 64                          # = chunk_dim
@@ -27,7 +33,8 @@ student:
   dropout: 0.0
   use_key_projection: false
   layer_normalization: false
-  use_mlp: false
+  use_mlp: true
+  ff_hidden_dim: 256
   teacher_readout: false
   use_output_projection: false
   skip_connection: false
@@ -35,9 +42,10 @@ student:
   pe_type: one_hot
   identity_decoder: true
   attention_bias: false
+  num_blocks: 2
 
 optimizer:
-  lr: 0.08
+  lr: 0.01
 
 misc:
   wandb:
