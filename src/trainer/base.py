@@ -163,20 +163,26 @@ class Trainer(ABC):
     def _init_loop(self) -> None:
         self.teacher = self.teacher.to(self.device)
         self.student = self.student.to(self.device)
-        for m in self.ngram_cfg.models.values():
-            m.to(self.device)
 
         self.teacher_eval = TeacherEvaluator(self.teacher, self.device)
-        self.ngram_evals = {
-            name: NgramEvaluator(
-                name=name,
-                model=model,
-                optimizer=self.ngram_cfg.optimizers[name],
-                teacher=self.teacher,
-                teacher_evaluator=self.teacher_eval,
-            )
-            for name, model in self.ngram_cfg.models.items()
-        }
+        # When the ngram training phase is disabled, skip ngram construction
+        # entirely — otherwise ngram KL runs on every log step even though the
+        # ngram models are never trained or trainable.
+        if self.ngram_cfg.steps > 0:
+            for m in self.ngram_cfg.models.values():
+                m.to(self.device)
+            self.ngram_evals = {
+                name: NgramEvaluator(
+                    name=name,
+                    model=model,
+                    optimizer=self.ngram_cfg.optimizers[name],
+                    teacher=self.teacher,
+                    teacher_evaluator=self.teacher_eval,
+                )
+                for name, model in self.ngram_cfg.models.items()
+            }
+        else:
+            self.ngram_evals = {}
         self.attention_logger = AttentionLogger(
             writer=self.logging_cfg.writer,
             teacher=self.teacher,
