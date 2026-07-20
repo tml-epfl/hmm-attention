@@ -53,10 +53,11 @@ class AttentionLogger:
         n_layers = attn_weights.shape[0]
 
         for layer in range(n_layers):
-            # Single-block runs keep the historical wandb keys (no `_L0`
-            # suffix); multi-block runs get per-layer keys so wandb does
-            # not overwrite them.
-            suffix = "" if n_layers == 1 else f"_L{layer}"
+            # Always prefix with `/L{layer}` — even for single-block runs — so
+            # wandb groups per-layer visualizations into a dedicated tab. This
+            # also keeps key structure stable when you flip `num_blocks` in an
+            # experiment.
+            suffix = f"/L{layer}"
 
             # Batch-averaged per-layer attention: (heads, seq_len, seq_len)
             attn_avg = (
@@ -69,12 +70,12 @@ class AttentionLogger:
                 layer=layer,
                 batch_idx=-1,
                 step=step,
-                table_key=f"attn/{split}{suffix}_weights",
+                table_key=f"attn/{split}{suffix}/weights",
             )
             log_attention_heatmap(
                 run=self.writer,
                 attn_weights=attn_avg,
-                log_key=f"attn/{split}{suffix}_heatmaps",
+                log_key=f"attn/{split}{suffix}/heatmaps",
                 step=step,
             )
 

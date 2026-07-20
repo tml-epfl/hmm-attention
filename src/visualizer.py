@@ -373,10 +373,10 @@ def log_value_matrix_alignment(
 
     # Per-head student norms as scalars.
     for h, norm in enumerate(student_norms):
-        log_dict[f"attn/{split}_value_norm_head{h}"] = norm
+        log_dict[f"attn/{split}/value_norm_head{h}"] = norm
 
     # Heatmap: cosine similarity (all pairs).
-    log_dict[f"attn/{split}_value_cos_sim"] = _heatmap_image(
+    log_dict[f"attn/{split}/value_cos_sim"] = _heatmap_image(
         cos_sim_mat,
         row_labels,
         col_labels,
@@ -389,7 +389,7 @@ def log_value_matrix_alignment(
 
     # Heatmap: projected norm (all pairs).
     abs_max = float(np.abs(proj_norm_mat).max()) or 1.0
-    log_dict[f"attn/{split}_value_proj_norm"] = _heatmap_image(
+    log_dict[f"attn/{split}/value_proj_norm"] = _heatmap_image(
         proj_norm_mat,
         row_labels,
         col_labels,
@@ -487,8 +487,8 @@ def log_value_alignment_scalars(
             inner = float(np.dot(w, a))
             # Cosine similarity: normalized to [-1, 1]
             cos = inner / (w_norm * a_norm) if a_norm > 0 else 0.0
-            log_dict[f"attn/{split}_value_cos_head{h}_teacher{k}"] = cos
-            log_dict[f"attn/{split}_value_inner_head{h}_teacher{k}"] = inner
+            log_dict[f"attn/{split}/value_cos_head{h}_teacher{k}"] = cos
+            log_dict[f"attn/{split}/value_inner_head{h}_teacher{k}"] = inner
 
     run.log(log_dict, step=step)
 
@@ -566,10 +566,10 @@ def log_attention_alignment(
 
     # Per-head student norms as scalars.
     for h, norm in enumerate(student_norms):
-        log_dict[f"attn/{split}_align_norm_head{h}"] = norm
+        log_dict[f"attn/{split}/align_norm_head{h}"] = norm
 
     # Heatmap: cosine similarity (all pairs).
-    log_dict[f"attn/{split}_align_cos_sim"] = _heatmap_image(
+    log_dict[f"attn/{split}/align_cos_sim"] = _heatmap_image(
         cos_sim_mat,
         row_labels,
         col_labels,
@@ -582,7 +582,7 @@ def log_attention_alignment(
 
     # Heatmap: projected norm (all pairs).
     abs_max = float(np.abs(proj_norm_mat).max()) or 1.0
-    log_dict[f"attn/{split}_align_proj_norm"] = _heatmap_image(
+    log_dict[f"attn/{split}/align_proj_norm"] = _heatmap_image(
         proj_norm_mat,
         row_labels,
         col_labels,
@@ -625,7 +625,7 @@ def log_attention_alignment(
         bar_images.append(wandb.Image(fig, caption=f"Head {h}"))
         plt.close(fig)
 
-    log_dict[f"attn/{split}_offset_charts"] = bar_images
+    log_dict[f"attn/{split}/offset_charts"] = bar_images
     run.log(log_dict, step=step)
 
 
@@ -678,6 +678,6 @@ def log_attention_span_mass(
     for k, (start, end) in enumerate(ranges):
         for h in range(num_heads):
             mass = float(last_rows[h, start:end].sum())
-            log_dict[f"attn/{split}_span_mass_head{h}_span{k}"] = mass
+            log_dict[f"attn/{split}/span_mass_head{h}_span{k}"] = mass
 
     run.log(log_dict, step=step)
