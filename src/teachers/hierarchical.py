@@ -1,4 +1,3 @@
-import math
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -223,36 +222,29 @@ class HierarchicalTeacher(ARTeacher):
         self, generator: Optional[torch.Generator] = None
     ) -> torch.Tensor:
         needed = self.hidden_dim * self.num_tuples
-        total_permutations = math.perm(self.chunk_dim, self.chunk_size)
-        if total_permutations < needed:
+        total_chunks = self.chunk_dim**self.chunk_size
+        if total_chunks < needed:
             raise ValueError(
-                "Not enough unique chunk permutations to cover all hidden tokens "
+                "Not enough unique surface chunks to cover all hidden tokens "
                 f"with {self.num_tuples} tuples each. "
-                f"Need {needed}, but only {total_permutations} available."
+                f"Need {needed}, but only {total_chunks} available."
             )
 
-        chunks = torch.zeros(
+        # Treat a chunk as a base-`chunk_dim` integer. This samples from the
+        # Cartesian product, so repeated surface symbols such as (3, 3) are
+        # valid. Sampling encoded chunks without replacement guarantees global
+        # uniqueness even when every possible chunk is used.
+        encoded = torch.randperm(total_chunks, generator=generator)[:needed]
+        slot_indices = torch.empty(needed, self.chunk_size, dtype=torch.long)
+        remainder = encoded
+        for slot in range(self.chunk_size - 1, -1, -1):
+            slot_indices[:, slot] = remainder % self.chunk_dim
+            remainder = remainder // self.chunk_dim
+
+        chunks = F.one_hot(slot_indices, num_classes=self.chunk_dim).float()
+        return chunks.reshape(
             self.hidden_dim, self.num_tuples, self.chunk_size, self.chunk_dim
         )
-        used: set = set()
-        for hid in range(self.hidden_dim):
-            for m in range(self.num_tuples):
-                for _ in range(1000):
-                    indices = torch.randperm(self.chunk_dim, generator=generator)[
-                        : self.chunk_size
-                    ]
-                    signature = tuple(indices.tolist())
-                    if signature not in used:
-                        used.add(signature)
-                        chunk = torch.zeros(self.chunk_size, self.chunk_dim)
-                        chunk[torch.arange(self.chunk_size), indices] = 1.0
-                        chunks[hid, m] = chunk
-                        break
-                else:
-                    raise RuntimeError(
-                        "Failed to sample a unique chunk sequence after many attempts."
-                    )
-        return chunks
 
     def decode_chunk_aligned(self, surface: torch.Tensor) -> torch.Tensor:
         """Public wrapper for `_decode_chunk_aligned` — surface -> hidden one-hots.

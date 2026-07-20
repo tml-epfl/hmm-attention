@@ -188,6 +188,35 @@ def test_hierarchical_teacher():
     print("\n[ALL PASS]")
 
 
+def test_chunk_generation_uses_full_cartesian_product():
+    """Repeated slot ids are valid and make all D**S chunks available."""
+    hidden_dim = 4
+    chunk_dim = 4
+    chunk_size = 2
+    num_tuples = 4
+    base = LinearARTeacher.from_parameters(
+        dim=hidden_dim,
+        span_lengths=[1],
+        rank=hidden_dim,
+        window=1,
+        multiplicative_constant=1.0,
+        scale=1.0,
+    )
+
+    teacher = HierarchicalTeacher(
+        base_teacher=base,
+        chunk_dim=chunk_dim,
+        chunk_size=chunk_size,
+        num_tuples=num_tuples,
+        chunk_seed=0,
+    )
+
+    indices = teacher._chunk_slot_indices.reshape(-1, chunk_size)
+    assert indices.shape[0] == chunk_dim**chunk_size
+    assert torch.unique(indices, dim=0).shape[0] == indices.shape[0]
+    assert (indices[:, 0] == indices[:, 1]).sum().item() == chunk_dim
+
+
 def test_hierarchical_teacher_stochastic():
     """M > 1: disjoint supports, deterministic surface->hidden, stochastic hidden->surface.
 
