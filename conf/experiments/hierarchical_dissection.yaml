@@ -13,7 +13,7 @@ teacher:
     rank: 64
     window: 3
     span_lengths: [1, 1, 1]        # in hidden space
-    multiplicative_constant: 1.7
+    multiplicative_constant: 1.0
     scale: 10                      # sharpness (formerly `temperature: 0.1`)
 
 dataset:
@@ -25,7 +25,7 @@ dataset:
 
 trainer:
   batch_size: 15000
-  steps: 100000
+  steps: 10000
 
 student:
   dim: 64                          # = chunk_dim
@@ -37,7 +37,7 @@ student:
   ff_hidden_dim: 256
   teacher_readout: false
   use_output_projection: false
-  skip_connection: false
+  skip_connection: true
   attention_disentanglement: true
   pe_type: one_hot
   identity_decoder: true
@@ -48,5 +48,7 @@ optimizer:
   lr: 0.01
 
 misc:
+  probe:
+    mode: sgd
   wandb:
-    tags: ["hierarchical-dissection", "span-1-1-1"]
+    tags: ["hierarchical-dissection", "span-1-1-1", "version-1"]
