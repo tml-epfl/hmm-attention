@@ -286,6 +286,7 @@ def log_value_matrix_alignment(
     step: int,
     split: str,
     layer: int = 0,
+    layer_name: Optional[str] = None,
 ) -> None:
     """Log all-pairs alignment between student value projections and teacher matrices.
 
@@ -370,13 +371,14 @@ def log_value_matrix_alignment(
     col_labels = [f"Teacher {k}" for k in range(num_teacher)]
 
     log_dict: dict = {}
+    scope = layer_name or f"L{layer + 1}"
 
     # Per-head student norms as scalars.
     for h, norm in enumerate(student_norms):
-        log_dict[f"attn/{split}/value_norm_head{h}"] = norm
+        log_dict[f"attn/{scope}/value_norm_head{h}/{split}"] = norm
 
     # Heatmap: cosine similarity (all pairs).
-    log_dict[f"attn/{split}/value_cos_sim"] = _heatmap_image(
+    log_dict[f"attn/{scope}/value_cos_sim/{split}"] = _heatmap_image(
         cos_sim_mat,
         row_labels,
         col_labels,
@@ -389,7 +391,7 @@ def log_value_matrix_alignment(
 
     # Heatmap: projected norm (all pairs).
     abs_max = float(np.abs(proj_norm_mat).max()) or 1.0
-    log_dict[f"attn/{split}/value_proj_norm"] = _heatmap_image(
+    log_dict[f"attn/{scope}/value_proj_norm/{split}"] = _heatmap_image(
         proj_norm_mat,
         row_labels,
         col_labels,
@@ -411,6 +413,7 @@ def log_value_alignment_scalars(
     step: int,
     split: str,
     layer: int = 0,
+    layer_name: Optional[str] = None,
 ) -> None:
     """Log per-(head, teacher) value matrix alignment as wandb scalars.
 
@@ -475,6 +478,7 @@ def log_value_alignment_scalars(
 
     # Compute all-pairs alignment and log as individual scalars.
     log_dict: dict = {}
+    scope = layer_name or f"L{layer + 1}"
     for h in range(num_heads):
         w = student_flat[h]
         w_norm = student_norms[h]
@@ -487,8 +491,8 @@ def log_value_alignment_scalars(
             inner = float(np.dot(w, a))
             # Cosine similarity: normalized to [-1, 1]
             cos = inner / (w_norm * a_norm) if a_norm > 0 else 0.0
-            log_dict[f"attn/{split}/value_cos_head{h}_teacher{k}"] = cos
-            log_dict[f"attn/{split}/value_inner_head{h}_teacher{k}"] = inner
+            log_dict[f"attn/{scope}/value_cos_head{h}_teacher{k}/{split}"] = cos
+            log_dict[f"attn/{scope}/value_inner_head{h}_teacher{k}/{split}"] = inner
 
     run.log(log_dict, step=step)
 
@@ -501,6 +505,7 @@ def log_attention_alignment(
     step: int,
     split: str,
     stride: Optional[int] = None,
+    layer_name: str = "L1",
 ) -> None:
     """Log all-pairs alignment between student attention rows and GT span distributions.
 
@@ -566,10 +571,10 @@ def log_attention_alignment(
 
     # Per-head student norms as scalars.
     for h, norm in enumerate(student_norms):
-        log_dict[f"attn/{split}/align_norm_head{h}"] = norm
+        log_dict[f"attn/{layer_name}/align_norm_head{h}/{split}"] = norm
 
     # Heatmap: cosine similarity (all pairs).
-    log_dict[f"attn/{split}/align_cos_sim"] = _heatmap_image(
+    log_dict[f"attn/{layer_name}/align_cos_sim/{split}"] = _heatmap_image(
         cos_sim_mat,
         row_labels,
         col_labels,
@@ -582,7 +587,7 @@ def log_attention_alignment(
 
     # Heatmap: projected norm (all pairs).
     abs_max = float(np.abs(proj_norm_mat).max()) or 1.0
-    log_dict[f"attn/{split}/align_proj_norm"] = _heatmap_image(
+    log_dict[f"attn/{layer_name}/align_proj_norm/{split}"] = _heatmap_image(
         proj_norm_mat,
         row_labels,
         col_labels,
@@ -625,7 +630,7 @@ def log_attention_alignment(
         bar_images.append(wandb.Image(fig, caption=f"Head {h}"))
         plt.close(fig)
 
-    log_dict[f"attn/{split}/offset_charts"] = bar_images
+    log_dict[f"attn/{layer_name}/offset_charts/{split}"] = bar_images
     run.log(log_dict, step=step)
 
 
@@ -637,6 +642,7 @@ def log_attention_span_mass(
     step: int,
     split: str,
     stride: Optional[int] = None,
+    layer_name: str = "L1",
 ) -> None:
     """Log the total attention mass each head places on each span's positions.
 
@@ -678,6 +684,6 @@ def log_attention_span_mass(
     for k, (start, end) in enumerate(ranges):
         for h in range(num_heads):
             mass = float(last_rows[h, start:end].sum())
-            log_dict[f"attn/{split}/span_mass_head{h}_span{k}"] = mass
+            log_dict[f"attn/{layer_name}/span_mass_head{h}_span{k}/{split}"] = mass
 
     run.log(log_dict, step=step)

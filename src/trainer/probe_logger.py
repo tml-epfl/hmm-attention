@@ -255,10 +255,11 @@ class ProbeLogger:
                         nll = F.cross_entropy(logits, y_eval).item()
                         acc = (logits.argmax(dim=-1) == y_eval).float().mean().item()
 
-                    key_stub = f"probe/{split}/L{layer_idx}/slot{slot}/k{offset}"
-                    metrics[f"{key_stub}/acc"] = acc
-                    metrics[f"{key_stub}/nll"] = nll
-                    metrics[f"{key_stub}/n"] = X_eval.shape[0]
+                    offset_name = _offset_name(offset)
+                    key_stub = f"probe/L{layer_idx}/slot{slot}/{offset_name}"
+                    metrics[f"{key_stub}/acc/{split}"] = acc
+                    metrics[f"{key_stub}/nll/{split}"] = nll
+                    metrics[f"{key_stub}/n/{split}"] = X_eval.shape[0]
                     heatmaps[offset][layer_idx, slot] = acc
 
         # Emit per-offset heatmaps.
@@ -266,7 +267,10 @@ class ProbeLogger:
             if np.isnan(mat).all():
                 continue
             fig = _accuracy_heatmap(mat, offset, split)
-            metrics[f"probe/{split}/summary/k{offset}/acc_heatmap"] = wandb.Image(fig)
+            offset_name = _offset_name(offset)
+            metrics[f"probe/summary/{offset_name}/acc_heatmap/{split}"] = wandb.Image(
+                fig
+            )
             plt.close(fig)
 
         self.writer.log(metrics, step=step)
@@ -387,3 +391,10 @@ def _accuracy_heatmap(mat: np.ndarray, offset: int, split: str) -> plt.Figure:
     ax.set_ylabel("layer")
     fig.tight_layout()
     return fig
+
+
+def _offset_name(offset: int) -> str:
+    """Return an explicit signed relative-offset label."""
+    if offset > 0:
+        return f"k+{offset}"
+    return f"k{offset}"

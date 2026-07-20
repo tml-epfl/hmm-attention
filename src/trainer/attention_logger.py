@@ -53,11 +53,11 @@ class AttentionLogger:
         n_layers = attn_weights.shape[0]
 
         for layer in range(n_layers):
-            # Always prefix with `/L{layer}` — even for single-block runs — so
+            # Always include `/L{layer}` — even for single-block runs — so
             # wandb groups per-layer visualizations into a dedicated tab. This
             # also keeps key structure stable when you flip `num_blocks` in an
-            # experiment.
-            suffix = f"/L{layer}"
+            # experiment. Dashboard layer numbers are one-based.
+            layer_name = f"L{layer + 1}"
 
             # Batch-averaged per-layer attention: (heads, seq_len, seq_len)
             attn_avg = (
@@ -70,12 +70,12 @@ class AttentionLogger:
                 layer=layer,
                 batch_idx=-1,
                 step=step,
-                table_key=f"attn/{split}{suffix}/weights",
+                table_key=f"attn/{layer_name}/weights/{split}",
             )
             log_attention_heatmap(
                 run=self.writer,
                 attn_weights=attn_avg,
-                log_key=f"attn/{split}{suffix}/heatmaps",
+                log_key=f"attn/{layer_name}/heatmaps/{split}",
                 step=step,
             )
 
@@ -84,14 +84,14 @@ class AttentionLogger:
                 ctx_len = getattr(
                     self.teacher, "context_length", sum(self.teacher.span_lengths)
                 )
-                split_layer = f"{split}{suffix}"
                 log_attention_alignment(
                     run=self.writer,
                     attn_avg=attn_avg,
                     span_lengths=self.teacher.span_lengths,
                     context_length=ctx_len,
                     step=step,
-                    split=split_layer,
+                    split=split,
+                    layer_name=layer_name,
                     stride=stride,
                 )
                 log_attention_span_mass(
@@ -100,7 +100,8 @@ class AttentionLogger:
                     span_lengths=self.teacher.span_lengths,
                     context_length=ctx_len,
                     step=step,
-                    split=split_layer,
+                    split=split,
+                    layer_name=layer_name,
                     stride=stride,
                 )
                 log_value_matrix_alignment(
@@ -109,7 +110,8 @@ class AttentionLogger:
                     student=self.student,
                     dim=self.teacher.dim,
                     step=step,
-                    split=split_layer,
+                    split=split,
+                    layer_name=layer_name,
                     layer=layer,
                 )
                 log_value_alignment_scalars(
@@ -118,6 +120,7 @@ class AttentionLogger:
                     student=self.student,
                     dim=self.teacher.dim,
                     step=step,
-                    split=split_layer,
+                    split=split,
+                    layer_name=layer_name,
                     layer=layer,
                 )
