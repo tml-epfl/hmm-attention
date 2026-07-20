@@ -1,4 +1,5 @@
-from typing import Dict, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import wandb
@@ -10,6 +11,12 @@ from src.runner.data import get_loaders, get_optimizer
 from src.runner.preprocess import configure_positional_encoding, preprocess_cfg
 from src.runner.verbose import log_student_summary, log_teacher_summary
 from src.trainer import LoggingConfig, NgramConfig, SchedulerConfig, Trainer
+from src.trainer.checkpoint import (
+    CHECKPOINT_FILENAME,
+    assert_config_matches,
+    config_hash,
+    load_checkpoint,
+)
 
 
 def _pass_sched_metric(scheduler: torch.optim.lr_scheduler._LRScheduler) -> bool:
@@ -24,14 +31,39 @@ def _update_scheduler_each_iter(
     return isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingLR)
 
 
-def _init_wandb(cfg: DictConfig):
-    return wandb.init(
+def _init_wandb(cfg: DictConfig, resume_run_id: Optional[str] = None):
+    """Initialise the wandb run.
+
+    When `resume_run_id` is provided, uses `resume="must"` so wandb hard-fails
+    if the server-side run is missing (instead of silently creating a new run
+    with the same id via `resume="allow"`). This is the load-bearing bit that
+    ensures a single wandb run across arbitrarily many crash-resume cycles.
+    """
+    kwargs = dict(
         config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True),
         entity=cfg.misc.wandb.entity,
         project=cfg.misc.wandb.project,
         tags=cfg.misc.wandb.tags,
         settings=wandb.Settings(start_method="thread"),
     )
+    if resume_run_id is not None:
+        kwargs["id"] = resume_run_id
+        kwargs["resume"] = "must"
+    return wandb.init(**kwargs)
+
+
+def _read_wandb_id_from_checkpoint(
+    path: Path, device: torch.device
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Peek at a checkpoint to get its wandb id + full payload.
+
+    Returns `(wandb_id, payload)`. Payload is loaded once here and reused when
+    building the trainer — avoids two `torch.load` passes over the same file.
+    """
+    if not path.exists():
+        return None, None
+    payload = load_checkpoint(path, device)
+    return payload.get("wandb_run_id"), payload
 
 
 def _build_student(
@@ -75,7 +107,43 @@ def get_trainer(cfg: DictConfig) -> Trainer:
     with open("config.yaml", "w") as f:
         OmegaConf.save(cfg, f)
 
-    writer = _init_wandb(cfg) if cfg.misc.wandb.use else None
+    # Checkpointing: content-addressed dir keyed by config hash. Same
+    # resolved config → same dir → resume works. Hydra's per-launch
+    # timestamped dir (still cwd, since `hydra.job.chdir: true`) keeps
+    # config.yaml and stdout separated per launch; only `checkpoint.pt` moves
+    # to the canonical hash-keyed location. This handles Runai job restarts
+    # (fresh Hydra timestamp on each pod launch) and sweeps (each config
+    # auto-partitions into its own hash dir with its own wandb run).
+    ckpt_cfg = cfg.misc.get("checkpoint", {})
+    ckpt_enabled = ckpt_cfg.get("enabled", True)
+    resume_enabled = ckpt_cfg.get("resume", True)
+    ckpt_root = Path(ckpt_cfg.get("root", "outputs/checkpoints"))
+
+    cfg_container = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
+    current_cfg_hash = config_hash(cfg_container)
+
+    checkpoint_path: Optional[Path] = None
+    if ckpt_enabled:
+        # Truncate to 16 chars — collision risk is negligible (2^64 space)
+        # while keeping the path short enough to be human-legible.
+        ckpt_dir = ckpt_root / current_cfg_hash[:16]
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = ckpt_dir / CHECKPOINT_FILENAME
+
+    resume_payload: Optional[Dict[str, Any]] = None
+    resume_wandb_id: Optional[str] = None
+    if resume_enabled and checkpoint_path is not None:
+        resume_wandb_id, resume_payload = _read_wandb_id_from_checkpoint(
+            checkpoint_path, torch.device(cfg.misc.device)
+        )
+        if resume_payload is not None:
+            assert_config_matches(resume_payload, current_cfg_hash)
+
+    writer = (
+        _init_wandb(cfg, resume_run_id=resume_wandb_id)
+        if cfg.misc.wandb.use
+        else None
+    )
 
     student, window, teacher_matrices = _build_student(cfg, teacher)
 
@@ -140,7 +208,7 @@ def get_trainer(cfg: DictConfig) -> Trainer:
     max_grad_norm = (
         cfg.trainer.max_grad_norm if "max_grad_norm" in cfg.trainer else None
     )
-    return trainer_cls(
+    trainer = trainer_cls(
         steps=cfg.trainer.steps,
         max_grad_norm=max_grad_norm,
         device=cfg.misc.device,
@@ -153,4 +221,42 @@ def get_trainer(cfg: DictConfig) -> Trainer:
         scheduler_cfg=scheduler_cfg,
         ngram_cfg=ngram_cfg,
         logging_cfg=logging_cfg,
+        checkpoint_path=checkpoint_path,
+        resume_from=checkpoint_path if resume_payload is not None else None,
+        wandb_run_id=(writer.id if writer is not None else None),
+        config_hash=current_cfg_hash,
     )
+
+    # Fresh run with wandb + checkpointing on: persist a *stub* checkpoint
+    # holding just the wandb run id + config hash. If we crash before the
+    # first log step (e.g. during the dry loop), the next launch still finds
+    # this stub and reattaches to the same wandb run instead of orphaning it
+    # and creating a second run. Full trainer state overwrites the stub on
+    # the first `_end_step`.
+    if (
+        resume_payload is None
+        and checkpoint_path is not None
+        and writer is not None
+    ):
+        _save_wandb_stub(checkpoint_path, writer.id, current_cfg_hash)
+
+    return trainer
+
+
+def _save_wandb_stub(path: Path, wandb_run_id: str, cfg_hash: str) -> None:
+    """Persist just the wandb id + config hash before training starts.
+
+    Distinguished from a full checkpoint by the absence of a `student` key —
+    `Trainer._maybe_resume` treats stub payloads as "no state to restore" but
+    the runner still uses the id to reattach to the wandb run.
+    """
+    import os
+
+    payload = {
+        "current_step": 0,
+        "wandb_run_id": wandb_run_id,
+        "config_hash": cfg_hash,
+    }
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, tmp)
+    os.replace(tmp, path)

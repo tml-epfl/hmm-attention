@@ -2,6 +2,7 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -19,6 +20,13 @@ from src.metrics import (
 )
 from src.teachers import ARTeacher
 from src.trainer.attention_logger import AttentionLogger
+from src.trainer.checkpoint import (
+    CHECKPOINT_FILENAME,
+    is_stub_payload,
+    load_checkpoint,
+    restore_into_trainer,
+    save_checkpoint,
+)
 from src.trainer.config import LoggingConfig, NgramConfig, SchedulerConfig
 from src.trainer.ngram_eval import NgramEvaluator
 from src.trainer.probe_logger import ProbeLogger
@@ -48,6 +56,10 @@ class Trainer(ABC):
         ngram_cfg: NgramConfig,
         logging_cfg: LoggingConfig,
         max_grad_norm: Optional[float] = None,
+        checkpoint_path: Optional[Path] = None,
+        resume_from: Optional[Path] = None,
+        wandb_run_id: Optional[str] = None,
+        config_hash: Optional[str] = None,
     ) -> None:
         self.steps = steps
         self.current_step = 0
@@ -65,6 +77,16 @@ class Trainer(ABC):
         self.max_grad_norm = max_grad_norm
         self.logger = logging.getLogger()
 
+        # Checkpointing: `checkpoint_path` is where we WRITE (None disables
+        # saves); `resume_from` is where we READ on startup (None = fresh run).
+        # `wandb_run_id`/`config_hash` are metadata the runner injects; stored
+        # in each checkpoint so a future resume can reattach to the same wandb
+        # run and reject config drift.
+        self.checkpoint_path = checkpoint_path
+        self.resume_from = resume_from
+        self.wandb_run_id = wandb_run_id
+        self.config_hash = config_hash
+
         # Populated in _init_loop after models are moved to device.
         self.teacher_eval: Optional[TeacherEvaluator] = None
         self.ngram_evals: Dict[str, NgramEvaluator] = {}
@@ -74,7 +96,10 @@ class Trainer(ABC):
     # --- Entry point ---
     def train(self) -> None:
         self._init_loop()
-        if isinstance(self.teacher, ARTeacher):
+        resumed = self._maybe_resume()
+        # On resume, constant teacher metrics ride in the loaded metrics
+        # snapshot — re-running the dry loop would double-count them.
+        if not resumed and isinstance(self.teacher, ARTeacher):
             self._dry_loop()  # TODO: adapt for TransformerDecoder
 
         self.logger.info("Beginning training")
@@ -235,6 +260,37 @@ class Trainer(ABC):
             self.history[key] = []
             self.metrics.register(key, metric_class(**constructor_kwargs))
 
+    # --- Checkpointing ---
+    def _maybe_resume(self) -> bool:
+        """Load `self.resume_from` into this trainer. Returns True on resume.
+
+        Stub payloads (wandb-id-only, written by the runner before training
+        starts) return False — the wandb id is already picked up in the
+        runner; the trainer needs a full state snapshot to actually resume.
+        """
+        if self.resume_from is None or not self.resume_from.exists():
+            return False
+        payload = load_checkpoint(self.resume_from, self.device)
+        if is_stub_payload(payload):
+            return False
+        restore_into_trainer(self, payload)
+        return True
+
+    def _save_checkpoint(self) -> None:
+        if self.checkpoint_path is None:
+            return
+        try:
+            save_checkpoint(
+                self,
+                path=self.checkpoint_path,
+                wandb_run_id=self.wandb_run_id,
+                cfg_hash=self.config_hash,
+            )
+        except OSError as e:
+            # Disk full / permission denied — keep training rather than
+            # killing a long run over a save failure.
+            self.logger.warning(f"Checkpoint save failed: {e}")
+
     def _dry_loop(self) -> None:
         """One-shot pass over train + val to populate the constant teacher metrics."""
         self.teacher.eval()
@@ -327,6 +383,11 @@ class Trainer(ABC):
 
         if self.logging_cfg.writer is not None:
             self._write_to_wandb(step, ngram_metrics)
+
+        # Persist BEFORE resetting metrics: the saved snapshot then matches
+        # the last-logged wandb step exactly, so a resumed run's next log at
+        # `step + log_frequency` satisfies wandb's monotonic-step rule.
+        self._save_checkpoint()
 
         metrics = ngram_metrics or self.metrics
         for metric in metrics.values():

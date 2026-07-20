@@ -8,6 +8,15 @@ wandb:
   project: hmm-attention
   entity: okyksl
   tags: []
+checkpoint:
+  # Checkpoints live at `<root>/<config_hash>/checkpoint.pt`. The config-hash
+  # subdir is what makes resume "just work" across Runai restarts + sweeps:
+  # same resolved config → same dir → same checkpoint → same wandb run.
+  # Different sweep configs auto-partition into separate dirs. Hydra's own
+  # per-launch output dir stays timestamped (kept for logs/config snapshots).
+  enabled: true
+  resume: true
+  root: outputs/checkpoints
 probe:
   mode: off              # off | warm_start | sgd
   frequency: 100
