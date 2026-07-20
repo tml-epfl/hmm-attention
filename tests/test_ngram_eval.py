@@ -79,6 +79,6 @@ def test_slice_data_falls_back_to_sum_when_no_context_length_attr():
 def test_metric_keys_use_correct_grouping():
     teacher = _StubTeacher(span_lengths=[1, 1], context_length=2)
     ev = _make_evaluator(teacher, _StubNgramModel(ngram=1), name="bigram")
-    assert ev.kl_metric_keys() == ["kl/bigram_train", "kl/bigram_val"]
-    assert ev.loss_metric_keys() == ["ngram_bigram/train_loss", "ngram_bigram/val_loss"]
-    assert ev.acc_metric_keys() == ["ngram_bigram/train_acc", "ngram_bigram/val_acc"]
+    assert ev.kl_metric_keys() == ["ngram_bigram/kl/train", "ngram_bigram/kl/val"]
+    assert ev.loss_metric_keys() == ["ngram_bigram/loss/train", "ngram_bigram/loss/val"]
+    assert ev.acc_metric_keys() == ["ngram_bigram/acc/train", "ngram_bigram/acc/val"]

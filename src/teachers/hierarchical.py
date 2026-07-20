@@ -254,6 +254,15 @@ class HierarchicalTeacher(ARTeacher):
                     )
         return chunks
 
+    def decode_chunk_aligned(self, surface: torch.Tensor) -> torch.Tensor:
+        """Public wrapper for `_decode_chunk_aligned` — surface -> hidden one-hots.
+
+        Surface tokens must be chunk-aligned (length divisible by `chunk_size`)
+        and each chunk must be a valid slot-tuple in the chunk table; otherwise
+        the argmax falls back to hidden id 0.
+        """
+        return self._decode_chunk_aligned(surface)
+
     def _decode_chunk_aligned(self, surface: torch.Tensor) -> torch.Tensor:
         """(..., L_h * chunk_size, chunk_dim) -> (..., L_h, hidden_dim) one-hot.
 

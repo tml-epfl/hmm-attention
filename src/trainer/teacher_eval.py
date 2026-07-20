@@ -2,12 +2,12 @@ from typing import Dict, List, Tuple
 
 import torch
 
-from src.loss import CrossentropyLoss, KLDivergenceLoss
+from src.loss import KLDivergenceLoss
 from src.teachers import ARTeacher
 
 
 class TeacherEvaluator:
-    """Runs the teacher (optionally lag-restricted) and updates KL metrics.
+    """Runs the teacher (optionally lag-restricted) and updates its metrics.
 
     Owns the precomputed `teacher.with_lag_restriction(k)` cache so train/val
     loops don't rebuild them each step. Also handles the "teacher-generated
@@ -31,11 +31,34 @@ class TeacherEvaluator:
     def metric_keys(self) -> List[str]:
         if not self.is_ar:
             return []
-        keys = ["kl/teacher_train", "kl/teacher_val"]
-        for k in self.prefix_ks:
-            for split in ("train", "val"):
-                keys.append(f"kl/teacher_k{k}_{split}")
-        return keys
+        return [
+            f"{context}/kl/{split}"
+            for context in self.context_names()
+            for split in ("train", "val")
+        ]
+
+    def context_names(self) -> List[str]:
+        if not self.is_ar:
+            return []
+        return ["teacher"] + [f"teacher_k{k}" for k in self.prefix_ks]
+
+    def loss_metric_keys(self) -> List[str]:
+        return [
+            f"{context}/loss/{split}"
+            for context in self.context_names()
+            for split in ("train", "val")
+        ]
+
+    def acc_metric_keys(self) -> List[str]:
+        return [
+            f"{context}/acc/{split}"
+            for context in self.context_names()
+            for split in ("train", "val")
+        ]
+
+    @staticmethod
+    def context_name(prefix: int) -> str:
+        return "teacher" if prefix < 0 else f"teacher_k{prefix}"
 
     def _resolve(self, prefix: int):
         if prefix > 0 and prefix in self._teacher_by_k:
@@ -74,33 +97,16 @@ class TeacherEvaluator:
         split: str,
         metrics: Dict[str, "LossMetric"],
     ) -> None:
-        """KL(student || teacher) at full context and each lag-restriction k."""
+        """KL(teacher || student) at full context and each lag restriction."""
         if not self.is_ar:
             return
         kl = KLDivergenceLoss(reduction="mean")
         probs, _, _ = self.run(data, prefix=-1, normalize=True)
-        metrics[f"kl/teacher_{split}"].update(
+        metrics[f"teacher/kl/{split}"].update(
             kl(student_out, probs).item(), data.size(0)
         )
         for k in self.prefix_ks:
             probs_k, _, _ = self.run(data, prefix=k, normalize=True)
-            metrics[f"kl/teacher_k{k}_{split}"].update(
+            metrics[f"teacher_k{k}/kl/{split}"].update(
                 kl(student_out, probs_k).item(), data.size(0)
             )
-
-    def true_loss(
-        self,
-        student_out: torch.Tensor,
-        data: torch.Tensor,
-        loss_fn: torch.nn.Module,
-    ) -> torch.Tensor:
-        """Loss of student vs teacher target.
-
-        Normalizes to probs when the training loss is `CrossentropyLoss`
-        (which wants soft-target probabilities); otherwise passes log-probs
-        through directly (KL / MSE apply their own transforms).
-        """
-        normalize = isinstance(loss_fn, CrossentropyLoss)
-        with torch.no_grad():
-            out, _, _ = self.run(data, prefix=-1, normalize=normalize)
-        return loss_fn(student_out, out)

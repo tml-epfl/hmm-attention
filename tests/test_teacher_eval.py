@@ -31,10 +31,12 @@ def test_evaluator_builds_lag_restricted_cache(tiny_teacher, device):
 def test_metric_keys_include_kl_teacher_and_per_k(tiny_teacher, device):
     ev = TeacherEvaluator(tiny_teacher, device=device)
     keys = set(ev.metric_keys())
-    assert "kl/teacher_train" in keys
-    assert "kl/teacher_val" in keys
-    assert "kl/teacher_k1_train" in keys
-    assert "kl/teacher_k2_val" in keys
+    assert "teacher/kl/train" in keys
+    assert "teacher/kl/val" in keys
+    assert "teacher_k1/kl/train" in keys
+    assert "teacher_k2/kl/val" in keys
+    assert "teacher_k1/loss/train" in ev.loss_metric_keys()
+    assert "teacher_k2/acc/val" in ev.acc_metric_keys()
 
 
 # ---- _align_data -------------------------------------------------------------
@@ -91,5 +93,5 @@ def test_update_kl_metrics_populates_registry(tiny_teacher, tiny_student, device
     fake_student_out = out_teacher.clone()  # perfect student → KL = 0.
 
     ev.update_kl_metrics(fake_student_out, data, split="train", metrics=reg)
-    assert reg["kl/teacher_train"].compute() >= 0
-    assert reg["kl/teacher_k1_train"].compute() >= 0
+    assert reg["teacher/kl/train"].compute() >= 0
+    assert reg["teacher_k1/kl/train"].compute() >= 0

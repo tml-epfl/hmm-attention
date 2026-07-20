@@ -44,10 +44,10 @@ def test_trainer_train_runs_two_steps_without_crash(smoke_trainer):
 
 
 def test_trainer_records_finite_val_best(smoke_trainer):
-    # `student/val_loss` is reset in `_end_step`, but `student/val_best`
+    # `student/loss/val` is reset in `_end_step`, but `student/loss/val_best`
     # (MinMetric) persists across steps — proves val actually ran.
     smoke_trainer.train()
-    best = smoke_trainer.metrics["student/val_best"].compute()
+    best = smoke_trainer.metrics["student/loss/val_best"].compute()
     assert math.isfinite(best)
     assert best >= 0
 
@@ -55,10 +55,20 @@ def test_trainer_records_finite_val_best(smoke_trainer):
 def test_trainer_populates_constant_teacher_metrics(smoke_trainer):
     # ConstantLossMetric populated once in `_dry_loop`; never reset.
     smoke_trainer.train()
-    tl = smoke_trainer.metrics["teacher/train_loss"].compute()
-    ta = smoke_trainer.metrics["teacher/train_acc"].compute()
+    tl = smoke_trainer.metrics["teacher/loss/train"].compute()
+    ta = smoke_trainer.metrics["teacher/acc/train"].compute()
     assert math.isfinite(tl) and tl >= 0
     assert 0 <= ta <= 1
+    prefix_loss = smoke_trainer.metrics["teacher_k1/loss/train"].compute()
+    prefix_acc = smoke_trainer.metrics["teacher_k1/acc/train"].compute()
+    assert math.isfinite(prefix_loss) and prefix_loss >= 0
+    assert 0 <= prefix_acc <= 1
+
+
+def test_trainer_does_not_register_redundant_true_loss(smoke_trainer):
+    smoke_trainer._init_loop()
+    assert "student/true_loss/train" not in smoke_trainer.metrics
+    assert "student/true_loss/val" not in smoke_trainer.metrics
 
 
 def test_trainer_has_no_ngram_evaluators_when_disabled(smoke_trainer):
@@ -77,4 +87,4 @@ def test_trainer_constructs_attention_logger(smoke_trainer):
 def test_trainer_metrics_registry_rejects_typos_after_init(smoke_trainer):
     smoke_trainer.train()
     with pytest.raises(KeyError):
-        smoke_trainer.metrics["student/train_los"]  # noqa: B015
+        smoke_trainer.metrics["student/loss/trai"]  # noqa: B015

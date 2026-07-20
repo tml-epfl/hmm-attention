@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import torch
 import wandb
@@ -43,3 +43,20 @@ class LoggingConfig:
     writer: Optional[wandb.run] = None
     attention_frequency: int = 100
     log_frequency: int = 1
+    # Hidden-state probe (see src/trainer/probe_logger.py).
+    # `probe_mode` selects fitting strategy:
+    #   "off"        — disabled, no hooks, no cost.
+    #   "warm_start" — per-eval LBFGS fit from previous weights. Hooks installed
+    #                  only during val forward. Best for standard eval cadence.
+    #   "sgd"        — persistent Adam update per training step. Hooks installed
+    #                  permanently; per-step cost is minimal. Best for
+    #                  high-frequency probing.
+    # `probe_offsets=None` → derive `[-base_teacher.context_length, ..., +1]`
+    # from the teacher at first-use (adaptive to the AR window).
+    probe_mode: str = "off"
+    probe_frequency: int = 100
+    probe_offsets: Optional[List[int]] = None
+    probe_max_iters: int = 20
+    probe_l2: float = 1e-3
+    probe_lr: float = 1e-2
+    probe_train_frac: float = 0.8

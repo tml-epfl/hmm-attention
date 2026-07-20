@@ -19,9 +19,13 @@ class SGDTrainer(Trainer):
         prof = get_profiler()
         self.student.zero_grad()
         self.optimizer.zero_grad()
-        out, target, loss, attn_weights = self._forward_and_metrics(
-            data, split="train", run_teacher_metrics=run_teacher_metrics
-        )
+        self.probe_logger.before_forward("train")
+        try:
+            out, target, loss, attn_weights = self._forward_and_metrics(
+                data, split="train", run_teacher_metrics=run_teacher_metrics
+            )
+        finally:
+            self.probe_logger.after_forward(data)
         with prof.cuda("student_backward"):
             loss.backward()
         if self.max_grad_norm is not None:
@@ -30,6 +34,8 @@ class SGDTrainer(Trainer):
             )
         with prof.cuda("optimizer_step"):
             self.optimizer.step()
+        with prof.cuda("probe_sgd_step"):
+            self.probe_logger.sgd_step()
         return out, target, loss, attn_weights
 
     def _is_log_step(self) -> bool:
@@ -86,10 +92,10 @@ class SGDTrainer(Trainer):
                 logits, target, loss = ne.train_step(
                     data, self.loss_fn, self.ngram_cfg.use_teacher_target
                 )
-                self.metrics[f"ngram_{ne.name}/train_loss"].update(
+                self.metrics[f"ngram_{ne.name}/loss/train"].update(
                     loss.item(), data.size(0)
                 )
-                self.metrics[f"ngram_{ne.name}/train_acc"].update(logits, target)
+                self.metrics[f"ngram_{ne.name}/acc/train"].update(logits, target)
 
             self._val_ngram()
             self._end_step(self.current_step, step_time=None, ngram=True)

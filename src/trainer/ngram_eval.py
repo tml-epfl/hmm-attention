@@ -29,13 +29,13 @@ class NgramEvaluator:
         self.teacher_evaluator = teacher_evaluator
 
     def kl_metric_keys(self) -> List[str]:
-        return [f"kl/{self.name}_{split}" for split in ("train", "val")]
+        return [f"ngram_{self.name}/kl/{split}" for split in ("train", "val")]
 
     def loss_metric_keys(self) -> List[str]:
-        return [f"ngram_{self.name}/{split}_loss" for split in ("train", "val")]
+        return [f"ngram_{self.name}/loss/{split}" for split in ("train", "val")]
 
     def acc_metric_keys(self) -> List[str]:
-        return [f"ngram_{self.name}/{split}_acc" for split in ("train", "val")]
+        return [f"ngram_{self.name}/acc/{split}" for split in ("train", "val")]
 
     def _slice_data(self, data: torch.Tensor) -> Tuple[torch.Tensor, Optional[int]]:
         """Drop the leading context the ngram model doesn't consume."""
@@ -71,10 +71,10 @@ class NgramEvaluator:
         split: str,
         metrics: Dict[str, "LossMetric"],
     ) -> None:
-        """KL(student || this ngram model)."""
+        """KL(this ngram model || student)."""
         kl = KLDivergenceLoss(reduction="mean")
         _, probs, _ = self._forward(data)
-        metrics[f"kl/{self.name}_{split}"].update(
+        metrics[f"ngram_{self.name}/kl/{split}"].update(
             kl(student_out, probs).item(), data.size(0)
         )
 

@@ -116,10 +116,21 @@ def get_trainer(cfg: DictConfig) -> Trainer:
             else False
         ),
     )
+    probe_cfg = cfg.misc.get("probe", {})
+    probe_offsets = probe_cfg.get("offsets", None)
+    if probe_offsets is not None:
+        probe_offsets = list(probe_offsets)
     logging_cfg = LoggingConfig(
         writer=writer,
         attention_frequency=cfg.misc.log_attention_frequency,
         log_frequency=cfg.misc.get("log_frequency", 1),
+        probe_mode=probe_cfg.get("mode", "off"),
+        probe_frequency=probe_cfg.get("frequency", 100),
+        probe_offsets=probe_offsets,
+        probe_max_iters=probe_cfg.get("max_iters", 20),
+        probe_l2=probe_cfg.get("l2", 1e-3),
+        probe_lr=probe_cfg.get("lr", 1e-2),
+        probe_train_frac=probe_cfg.get("train_frac", 0.8),
     )
 
     # Construct the trainer class directly. Hydra's `instantiate` cannot merge

@@ -21,6 +21,7 @@ from src.teachers import ARTeacher
 from src.trainer.attention_logger import AttentionLogger
 from src.trainer.config import LoggingConfig, NgramConfig, SchedulerConfig
 from src.trainer.ngram_eval import NgramEvaluator
+from src.trainer.probe_logger import ProbeLogger
 from src.trainer.registry import MetricRegistry
 from src.trainer.teacher_eval import TeacherEvaluator
 
@@ -68,6 +69,7 @@ class Trainer(ABC):
         self.teacher_eval: Optional[TeacherEvaluator] = None
         self.ngram_evals: Dict[str, NgramEvaluator] = {}
         self.attention_logger: Optional[AttentionLogger] = None
+        self.probe_logger: Optional[ProbeLogger] = None
 
     # --- Entry point ---
     def train(self) -> None:
@@ -131,13 +133,13 @@ class Trainer(ABC):
         split: str,
         run_teacher_metrics: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Student forward + loss/acc + teacher/ngram KL + teacher-target loss.
+        """Student forward plus loss/accuracy and teacher/ngram KL metrics.
 
         Returns `(out, target, loss, attn_weights)`. Shared by train and val —
         the training loop only adds `backward` + `optimizer.step` around this.
 
-        `run_teacher_metrics=False` skips the teacher KL / ngram KL / true-loss
-        computations (~`window + 2` extra teacher forwards). Student loss/acc
+        `run_teacher_metrics=False` skips the teacher and ngram KL computations.
+        Student loss/accuracy
         are always updated because they are cheap and drive the LR scheduler.
         """
         prof = get_profiler()
@@ -145,8 +147,8 @@ class Trainer(ABC):
             out, target, attn_weights = self._run_student(data)
             loss = self.loss_fn(out, target)
 
-        self.metrics[f"student/{split}_loss"].update(loss.item(), data.size(0))
-        self.metrics[f"student/{split}_acc"].update(out, target)
+        self.metrics[f"student/loss/{split}"].update(loss.item(), data.size(0))
+        self.metrics[f"student/acc/{split}"].update(out, target)
 
         if run_teacher_metrics and isinstance(self.teacher, ARTeacher):
             with prof.cuda(f"teacher_kl_{split}"):
@@ -154,11 +156,6 @@ class Trainer(ABC):
             with prof.cuda(f"ngram_kl_{split}"):
                 for ne in self.ngram_evals.values():
                     ne.update_kl(out, data, split, self.metrics)
-            with prof.cuda(f"teacher_true_loss_{split}"):
-                true_loss = self.teacher_eval.true_loss(out, data, self.loss_fn)
-            self.metrics[f"student/{split}_true_loss"].update(
-                true_loss.item(), data.size(0)
-            )
 
         return out, target, loss, attn_weights
 
@@ -192,17 +189,21 @@ class Trainer(ABC):
             student=self.student,
             frequency=self.logging_cfg.attention_frequency,
         )
+        self.probe_logger = ProbeLogger(
+            writer=self.logging_cfg.writer,
+            teacher=self.teacher,
+            student=self.student,
+            cfg=self.logging_cfg,
+        )
 
         self.history: Dict[str, List[float]] = {}
         self.metrics = MetricRegistry()
         for key, metric in (
-            ("student/train_loss", LossMetric()),
-            ("student/train_true_loss", LossMetric()),
-            ("student/train_acc", AccuracyMetric(k=1)),
-            ("student/val_loss", LossMetric()),
-            ("student/val_true_loss", LossMetric()),
-            ("student/val_acc", AccuracyMetric(k=1)),
-            ("student/val_best", MinMetric()),
+            ("student/loss/train", LossMetric()),
+            ("student/acc/train", AccuracyMetric(k=1)),
+            ("student/loss/val", LossMetric()),
+            ("student/acc/val", AccuracyMetric(k=1)),
+            ("student/loss/val_best", MinMetric()),
             ("student/grad_norm", LossMetric()),
         ):
             self.history[key] = []
@@ -211,10 +212,10 @@ class Trainer(ABC):
         if isinstance(self.teacher, ARTeacher):
             self._register_metrics(self.teacher_eval.metric_keys(), LossMetric)
             self._register_metrics(
-                ["teacher/train_loss", "teacher/val_loss"], ConstantLossMetric
+                self.teacher_eval.loss_metric_keys(), ConstantLossMetric
             )
             self._register_metrics(
-                ["teacher/train_acc", "teacher/val_acc"], ConstantAccuracyMetric, k=1
+                self.teacher_eval.acc_metric_keys(), ConstantAccuracyMetric, k=1
             )
             for ne in self.ngram_evals.values():
                 self._register_metrics(ne.kl_metric_keys(), LossMetric)
@@ -222,9 +223,9 @@ class Trainer(ABC):
                 self._register_metrics(ne.acc_metric_keys(), AccuracyMetric, k=1)
 
         self.lr_metric = (
-            self.metrics["student/train_loss"]
+            self.metrics["student/loss/train"]
             if self.scheduler_cfg.update_on_iter
-            else self.metrics["student/val_loss"]
+            else self.metrics["student/loss/val"]
         )
 
     def _register_metrics(
@@ -237,22 +238,24 @@ class Trainer(ABC):
     def _dry_loop(self) -> None:
         """One-shot pass over train + val to populate the constant teacher metrics."""
         self.teacher.eval()
-        normalize = isinstance(self.loss_fn, CrossentropyLoss)
-
         for split, loader in (("train", self.train_loader), ("val", self.val_loader)):
             pbar = tqdm.tqdm(total=len(loader), leave=False)
             pbar.set_description(f"Dry run | {split.capitalize()}")
             for data in loader:
                 data = data.to(self.device)
-                _, log_probs, target = self.teacher_eval.run(
-                    data, prefix=-1, normalize=normalize
-                )
-                # CE and KL both apply log_softmax internally, which is a
-                # near-identity on log-probs (see src/loss.py:55).
-                self.metrics[f"teacher/{split}_loss"].update(
-                    self.loss_fn(log_probs, target).item(), target.shape[0]
-                )
-                self.metrics[f"teacher/{split}_acc"].update(log_probs, target)
+                for prefix in [-1] + self.teacher_eval.prefix_ks:
+                    _, log_probs, target = self.teacher_eval.run(
+                        data, prefix=prefix, normalize=False
+                    )
+                    context = self.teacher_eval.context_name(prefix)
+                    # CE and KL both apply log_softmax internally, which is a
+                    # near-identity on log-probs (see src/loss.py:55).
+                    self.metrics[f"{context}/loss/{split}"].update(
+                        self.loss_fn(log_probs, target).item(), target.shape[0]
+                    )
+                    self.metrics[f"{context}/acc/{split}"].update(
+                        log_probs, target
+                    )
                 pbar.update()
             pbar.close()
 
@@ -273,9 +276,18 @@ class Trainer(ABC):
             with torch.no_grad():
                 with prof.cuda("data_to_device_val"):
                     data = data.to(self.device)
-                _, _, _, attn_weights = self._forward_and_metrics(data, split="val")
+                self.probe_logger.before_forward("val")
+                try:
+                    _, _, _, attn_weights = self._forward_and_metrics(
+                        data, split="val"
+                    )
+                finally:
+                    self.probe_logger.after_forward(data)
+                self.probe_logger.collect_val_batch()
                 attn_batches.append(attn_weights)
         self.attention_logger.log(step, "val", attn_batches)
+        with prof.cuda("probe_log"):
+            self.probe_logger.log(step, "val")
 
     def _val_ngram(self) -> None:
         for ne in self.ngram_evals.values():
@@ -288,10 +300,10 @@ class Trainer(ABC):
                     logits, target, loss = ne.eval_step(
                         data, self.loss_fn, self.ngram_cfg.use_teacher_target
                     )
-                    self.metrics[f"ngram_{ne.name}/val_loss"].update(
+                    self.metrics[f"ngram_{ne.name}/loss/val"].update(
                         loss.item(), data.size(0)
                     )
-                    self.metrics[f"ngram_{ne.name}/val_acc"].update(logits, target)
+                    self.metrics[f"ngram_{ne.name}/acc/val"].update(logits, target)
 
     # --- End-of-step book-keeping ---
     def _end_step(
@@ -300,9 +312,9 @@ class Trainer(ABC):
         self.logger.info(self._step_str(step, step_time, ngram))
 
         if self.val_loader is not None:
-            loss_avg = self.metrics["student/val_loss"].compute()
-            if loss_avg < self.metrics["student/val_best"].compute():
-                self.metrics["student/val_best"].update(loss_avg)
+            loss_avg = self.metrics["student/loss/val"].compute()
+            if loss_avg < self.metrics["student/loss/val_best"].compute():
+                self.metrics["student/loss/val_best"].update(loss_avg)
 
         if ngram:
             ngram_metrics = {
@@ -334,15 +346,15 @@ class Trainer(ABC):
         if ngram:
             for ne in self.ngram_evals.values():
                 s += (
-                    f"| {ne.name} Train loss: {self.metrics[f'ngram_{ne.name}/train_loss'].compute():.3f} "
-                    f"| {ne.name} Train acc: {self.metrics[f'ngram_{ne.name}/train_acc'].compute():.3f} "
+                    f"| {ne.name} Train loss: {self.metrics[f'ngram_{ne.name}/loss/train'].compute():.3f} "
+                    f"| {ne.name} Train acc: {self.metrics[f'ngram_{ne.name}/acc/train'].compute():.3f} "
                 )
         else:
-            s += f"| Train loss: {self.metrics['student/train_loss'].compute():.3f} "
+            s += f"| Train loss: {self.metrics['student/loss/train'].compute():.3f} "
             if isinstance(self.loss_fn, CrossentropyLoss):
-                s += f"| Train acc: {self.metrics['student/train_acc'].compute():.3f} "
+                s += f"| Train acc: {self.metrics['student/acc/train'].compute():.3f} "
                 if isinstance(self.teacher, ARTeacher):
-                    s += f"| Train teacher acc: {self.metrics['teacher/train_acc'].compute():.3f} "
+                    s += f"| Train teacher acc: {self.metrics['teacher/acc/train'].compute():.3f} "
         return s
 
     def _write_to_wandb(self, step: int, ngram_metrics=None) -> None:
