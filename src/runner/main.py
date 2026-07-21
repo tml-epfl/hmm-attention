@@ -31,13 +31,23 @@ def _update_scheduler_each_iter(
     return isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingLR)
 
 
-def _init_wandb(cfg: DictConfig, resume_run_id: Optional[str] = None):
+def _init_wandb(
+    cfg: DictConfig,
+    resume_run_id: Optional[str] = None,
+    rewind_step: Optional[int] = None,
+):
     """Initialise the wandb run.
 
-    When `resume_run_id` is provided, uses `resume="must"` so wandb hard-fails
-    if the server-side run is missing (instead of silently creating a new run
-    with the same id via `resume="allow"`). This is the load-bearing bit that
-    ensures a single wandb run across arbitrarily many crash-resume cycles.
+    Resume semantics: when `resume_run_id` is provided we use wandb's Run
+    Rewind (`resume_from="<id>?_step=<step>"`, requires SDK >= 0.17.1). Rewind
+    keeps the SAME run id but truncates any history logged after `rewind_step`
+    — so if the pre-crash run logged past our last checkpointed step, those
+    "phantom" points get dropped and the resumed run overwrites them cleanly.
+
+    Rewind auto-fails (raises during init) if the server-side run is missing,
+    which gives us the same hard-fail-on-lost-run guarantee that
+    `resume="must"` provided. Wandb keeps an archived copy of the pre-rewind
+    history reachable via the run's "Forked From" field.
     """
     kwargs = dict(
         config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True),
@@ -47,23 +57,31 @@ def _init_wandb(cfg: DictConfig, resume_run_id: Optional[str] = None):
         settings=wandb.Settings(start_method="thread"),
     )
     if resume_run_id is not None:
-        kwargs["id"] = resume_run_id
-        kwargs["resume"] = "must"
+        assert rewind_step is not None, (
+            "rewind_step is required when resume_run_id is provided"
+        )
+        kwargs["resume_from"] = f"{resume_run_id}?_step={rewind_step}"
     return wandb.init(**kwargs)
 
 
-def _read_wandb_id_from_checkpoint(
+def _read_checkpoint_metadata(
     path: Path, device: torch.device
-) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    """Peek at a checkpoint to get its wandb id + full payload.
+) -> Tuple[Optional[str], Optional[int], Optional[Dict[str, Any]]]:
+    """Peek at a checkpoint to get its wandb id + saved step + full payload.
 
-    Returns `(wandb_id, payload)`. Payload is loaded once here and reused when
-    building the trainer — avoids two `torch.load` passes over the same file.
+    Returns `(wandb_id, saved_step, payload)`. Payload is loaded once here and
+    reused when building the trainer — avoids two `torch.load` passes.
+    `saved_step` is None for the pre-stub case (no checkpoint) and 0 for the
+    stub (rewind-to-0 is a no-op that still keeps the run id stable).
     """
     if not path.exists():
-        return None, None
+        return None, None, None
     payload = load_checkpoint(path, device)
-    return payload.get("wandb_run_id"), payload
+    return (
+        payload.get("wandb_run_id"),
+        payload.get("current_step", 0),
+        payload,
+    )
 
 
 def _build_student(
@@ -132,15 +150,20 @@ def get_trainer(cfg: DictConfig) -> Trainer:
 
     resume_payload: Optional[Dict[str, Any]] = None
     resume_wandb_id: Optional[str] = None
+    resume_step: Optional[int] = None
     if resume_enabled and checkpoint_path is not None:
-        resume_wandb_id, resume_payload = _read_wandb_id_from_checkpoint(
+        resume_wandb_id, resume_step, resume_payload = _read_checkpoint_metadata(
             checkpoint_path, torch.device(cfg.misc.device)
         )
         if resume_payload is not None:
             assert_config_matches(resume_payload, current_cfg_hash)
 
     writer = (
-        _init_wandb(cfg, resume_run_id=resume_wandb_id)
+        _init_wandb(
+            cfg,
+            resume_run_id=resume_wandb_id,
+            rewind_step=resume_step,
+        )
         if cfg.misc.wandb.use
         else None
     )
