@@ -14,9 +14,16 @@ checkpoint:
   # same resolved config → same dir → same checkpoint → same wandb run.
   # Different sweep configs auto-partition into separate dirs. Hydra's own
   # per-launch output dir stays timestamped (kept for logs/config snapshots).
+  #
+  # `root` MUST be absolute (or resolve to an absolute path). `hydra.job.chdir:
+  # true` means the process chdirs into a fresh timestamped dir on each
+  # launch, so a relative `root` would resolve to a *different* location every
+  # time and resume would never fire. `${hydra:runtime.cwd}` resolves to the
+  # directory where `python train.py` was invoked (before Hydra chdirs) — that
+  # is stable across launches from the same working tree.
   enabled: true
   resume: true
-  root: outputs/checkpoints
+  root: ${hydra:runtime.cwd}/outputs/checkpoints
 probe:
   mode: off              # off | warm_start | sgd
   frequency: 100
