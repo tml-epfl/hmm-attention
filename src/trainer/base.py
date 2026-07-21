@@ -60,6 +60,7 @@ class Trainer(ABC):
         resume_from: Optional[Path] = None,
         wandb_run_id: Optional[str] = None,
         config_hash: Optional[str] = None,
+        checkpoint_frequency: int = 1,
     ) -> None:
         self.steps = steps
         self.current_step = 0
@@ -86,6 +87,14 @@ class Trainer(ABC):
         self.resume_from = resume_from
         self.wandb_run_id = wandb_run_id
         self.config_hash = config_hash
+        # Save every N calls to `_save_checkpoint` (= every N log steps).
+        # Trade-off: higher N cuts I/O but on resume you'd re-run the (N-1)
+        # log-steps' worth of work that already got logged to wandb — wandb
+        # drops non-monotonic step logs, so those re-logs become no-ops and
+        # you'd see a discontinuity in the curves. Default 1 keeps the saved
+        # step identical to the last wandb-logged step (no gap possible).
+        self.checkpoint_frequency = max(1, int(checkpoint_frequency))
+        self._save_counter = 0
 
         # Populated in _init_loop after models are moved to device.
         self.teacher_eval: Optional[TeacherEvaluator] = None
@@ -279,17 +288,25 @@ class Trainer(ABC):
     def _save_checkpoint(self) -> None:
         if self.checkpoint_path is None:
             return
-        try:
-            save_checkpoint(
-                self,
-                path=self.checkpoint_path,
-                wandb_run_id=self.wandb_run_id,
-                cfg_hash=self.config_hash,
-            )
-        except OSError as e:
-            # Disk full / permission denied — keep training rather than
-            # killing a long run over a save failure.
-            self.logger.warning(f"Checkpoint save failed: {e}")
+        # Skip based on modulo, count both taken + skipped calls so the cadence
+        # is stable regardless of when training started.
+        should_save = (self._save_counter % self.checkpoint_frequency) == 0
+        self._save_counter += 1
+        if not should_save:
+            return
+        prof = get_profiler()
+        with prof.cuda("checkpoint_save"):
+            try:
+                save_checkpoint(
+                    self,
+                    path=self.checkpoint_path,
+                    wandb_run_id=self.wandb_run_id,
+                    cfg_hash=self.config_hash,
+                )
+            except OSError as e:
+                # Disk full / permission denied — keep training rather than
+                # killing a long run over a save failure.
+                self.logger.warning(f"Checkpoint save failed: {e}")
 
     def _dry_loop(self) -> None:
         """One-shot pass over train + val to populate the constant teacher metrics."""

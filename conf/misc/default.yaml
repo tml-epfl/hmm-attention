@@ -24,6 +24,12 @@ checkpoint:
   enabled: true
   resume: true
   root: ${hydra:runtime.cwd}/outputs/checkpoints
+  # Save every Nth log step. 1 = save on every log step (checkpoint step ==
+  # last wandb-logged step, no history gap possible on resume). N > 1 saves
+  # I/O at the cost of "up to (N-1)*log_frequency training steps of lost
+  # work" on resume — wandb drops those re-logs as non-monotonic. Prefer
+  # bumping `log_frequency` over this knob if I/O becomes a real bottleneck.
+  frequency: 1
 probe:
   mode: off              # off | warm_start | sgd
   frequency: 100

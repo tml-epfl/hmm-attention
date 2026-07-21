@@ -225,6 +225,7 @@ def get_trainer(cfg: DictConfig) -> Trainer:
         resume_from=checkpoint_path if resume_payload is not None else None,
         wandb_run_id=(writer.id if writer is not None else None),
         config_hash=current_cfg_hash,
+        checkpoint_frequency=int(ckpt_cfg.get("frequency", 1)),
     )
 
     # Fresh run with wandb + checkpointing on: persist a *stub* checkpoint
