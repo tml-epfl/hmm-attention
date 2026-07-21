@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -17,6 +18,7 @@ from src.trainer.checkpoint import (
     config_hash,
     load_checkpoint,
 )
+from src.trainer import lock as work_lock
 
 
 def _pass_sched_metric(scheduler: torch.optim.lr_scheduler._LRScheduler) -> bool:
@@ -125,7 +127,17 @@ def _build_ngram_models(
     }
 
 
-def get_trainer(cfg: DictConfig) -> Trainer:
+def get_trainer(cfg: DictConfig) -> Optional[Trainer]:
+    """Construct the trainer, or return None if this config is claimed.
+
+    Returns None when either:
+    - the config has already completed (a `done` marker exists in its ckpt dir), or
+    - another live worker holds the flock on the config's `lock` file.
+
+    In both cases the caller (`train.py`) exits cleanly without touching wandb,
+    so parallel sweep workers cooperatively partition the configs with zero
+    coordination overhead beyond a filesystem lock.
+    """
     cfg = preprocess_cfg(cfg)
 
     teacher = instantiate(cfg.teacher)
@@ -151,12 +163,29 @@ def get_trainer(cfg: DictConfig) -> Trainer:
     current_cfg_hash = config_hash(cfg_container)
 
     checkpoint_path: Optional[Path] = None
+    ckpt_dir: Optional[Path] = None
     if ckpt_enabled:
         # Truncate to 16 chars — collision risk is negligible (2^64 space)
         # while keeping the path short enough to be human-legible.
         ckpt_dir = ckpt_root / current_cfg_hash[:16]
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         checkpoint_path = ckpt_dir / CHECKPOINT_FILENAME
+
+    # Work coordination: bail out BEFORE wandb.init if this config is either
+    # already completed or claimed by a live worker. Skipping here means we
+    # never create an orphan wandb run for a config someone else owns.
+    if ckpt_dir is not None:
+        if work_lock.is_completed(ckpt_dir):
+            logging.getLogger().info(
+                f"Config {current_cfg_hash[:16]} already completed; skipping."
+            )
+            return None
+        if not work_lock.try_acquire(ckpt_dir):
+            logging.getLogger().info(
+                f"Config {current_cfg_hash[:16]} is being worked on by another "
+                "worker; skipping."
+            )
+            return None
 
     resume_payload: Optional[Dict[str, Any]] = None
     resume_wandb_id: Optional[str] = None
