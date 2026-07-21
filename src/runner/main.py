@@ -38,16 +38,22 @@ def _init_wandb(
 ):
     """Initialise the wandb run.
 
-    Resume semantics: when `resume_run_id` is provided we use wandb's Run
-    Rewind (`resume_from="<id>?_step=<step>"`, requires SDK >= 0.17.1). Rewind
-    keeps the SAME run id but truncates any history logged after `rewind_step`
-    — so if the pre-crash run logged past our last checkpointed step, those
-    "phantom" points get dropped and the resumed run overwrites them cleanly.
+    Two resume modes, gated by `cfg.misc.wandb.rewind`:
 
-    Rewind auto-fails (raises during init) if the server-side run is missing,
-    which gives us the same hard-fail-on-lost-run guarantee that
-    `resume="must"` provided. Wandb keeps an archived copy of the pre-rewind
-    history reachable via the run's "Forked From" field.
+    - **rewind=False (default):** `id=<run_id>, resume="must"`. Reattaches to
+      the same run; wandb silently drops any `log(step=k)` where
+      k ≤ last_logged_step. Safe when `checkpoint.frequency=1` because the
+      last checkpoint step equals the last wandb-logged step — no drops.
+
+    - **rewind=True:** `resume_from="<id>?_step=<step>"`. Uses wandb Run
+      Rewind (SDK >= 0.17.1) to truncate history past `rewind_step`, then
+      resume. Cleanly overwrites phantom curves when `checkpoint.frequency>1`.
+      Rewind is currently **in private preview on wandb.ai** — enabling it
+      without account access raises `CommError: Rewind is in private
+      preview`. Leave off unless your workspace has it enabled.
+
+    Both modes hard-fail if the server-side run is missing, preserving the
+    single-wandb-run guarantee across resumes.
     """
     kwargs = dict(
         config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True),
@@ -57,10 +63,14 @@ def _init_wandb(
         settings=wandb.Settings(start_method="thread"),
     )
     if resume_run_id is not None:
-        assert rewind_step is not None, (
-            "rewind_step is required when resume_run_id is provided"
-        )
-        kwargs["resume_from"] = f"{resume_run_id}?_step={rewind_step}"
+        if cfg.misc.wandb.get("rewind", False):
+            assert rewind_step is not None, (
+                "rewind_step is required when resume_run_id is provided"
+            )
+            kwargs["resume_from"] = f"{resume_run_id}?_step={rewind_step}"
+        else:
+            kwargs["id"] = resume_run_id
+            kwargs["resume"] = "must"
     return wandb.init(**kwargs)
 
 
@@ -168,6 +178,19 @@ def get_trainer(cfg: DictConfig) -> Trainer:
         else None
     )
 
+    # Persist the wandb id NOW, before any construction work that could OOM /
+    # crash. Anything between `wandb.init` and this write is a hole where the
+    # wandb run exists on the server but no stub is on disk — the next launch
+    # would then call `wandb.init` fresh and orphan the first run. We saw
+    # exactly this (helpful-universe-117 crashed pre-first-log, then a resume
+    # attempt spawned royal-armadillo-118 as a new run).
+    if (
+        resume_payload is None
+        and checkpoint_path is not None
+        and writer is not None
+    ):
+        _save_wandb_stub(checkpoint_path, writer.id, current_cfg_hash)
+
     student, window, teacher_matrices = _build_student(cfg, teacher)
 
     predictor_cfg = (
@@ -250,19 +273,6 @@ def get_trainer(cfg: DictConfig) -> Trainer:
         config_hash=current_cfg_hash,
         checkpoint_frequency=int(ckpt_cfg.get("frequency", 1)),
     )
-
-    # Fresh run with wandb + checkpointing on: persist a *stub* checkpoint
-    # holding just the wandb run id + config hash. If we crash before the
-    # first log step (e.g. during the dry loop), the next launch still finds
-    # this stub and reattaches to the same wandb run instead of orphaning it
-    # and creating a second run. Full trainer state overwrites the stub on
-    # the first `_end_step`.
-    if (
-        resume_payload is None
-        and checkpoint_path is not None
-        and writer is not None
-    ):
-        _save_wandb_stub(checkpoint_path, writer.id, current_cfg_hash)
 
     return trainer
 

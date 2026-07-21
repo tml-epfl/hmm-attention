@@ -8,6 +8,13 @@ wandb:
   project: hmm-attention
   entity: okyksl
   tags: []
+  # Resume mode. `false` uses `resume="must"` (silently drops non-monotonic
+  # logs) — safe with `checkpoint.frequency=1`. `true` uses wandb Run Rewind
+  # (`resume_from`) to truncate + overwrite phantom history — required when
+  # `checkpoint.frequency>1`, but is in private preview on wandb.ai as of
+  # 2026-07 and errors with `CommError: Rewind is in private preview` unless
+  # your workspace has it enabled. Contact wandb support to enable.
+  rewind: false
 checkpoint:
   # Checkpoints live at `<root>/<config_hash>/checkpoint.pt`. The config-hash
   # subdir is what makes resume "just work" across Runai restarts + sweeps:
