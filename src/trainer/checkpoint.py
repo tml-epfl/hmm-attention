@@ -57,11 +57,16 @@ def _rng_state() -> Dict[str, Any]:
 
 
 def _restore_rng(state: Dict[str, Any]) -> None:
-    torch.set_rng_state(state["torch"])
+    # `torch.set_rng_state` requires a CPU ByteTensor. `torch.load(...,
+    # map_location=device)` moves every tensor in the payload — including
+    # this RNG state — onto the device, so we force it back to CPU before
+    # restoring. Same for the per-device CUDA RNG list.
+    torch.set_rng_state(state["torch"].cpu())
     np.random.set_state(state["numpy"])
     random.setstate(state["python"])
     if torch.cuda.is_available() and "cuda" in state:
-        torch.cuda.set_rng_state_all(state["cuda"])
+        cuda_states = [s.cpu() for s in state["cuda"]]
+        torch.cuda.set_rng_state_all(cuda_states)
 
 
 def _metrics_state(trainer) -> Dict[str, Dict[str, Any]]:

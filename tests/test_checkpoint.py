@@ -150,6 +150,22 @@ def test_resume_advances_step_by_one(
         assert torch.equal(v, resumed.student.state_dict()[k])
 
 
+def test_rng_state_survives_device_map(tmp_path, tiny_teacher, tiny_student, tiny_loaders, device):
+    """Loading with `map_location=device` moves ALL tensors onto device, but
+    `torch.set_rng_state` requires a CPU ByteTensor. Regression for a resume
+    crash: `TypeError: RNG state must be a torch.ByteTensor`."""
+    from src.trainer.checkpoint import _restore_rng
+
+    trainer = _make_trainer(tiny_teacher, tiny_student, tiny_loaders, device)
+    trainer._init_loop()
+    path = tmp_path / "ckpt.pt"
+    save_checkpoint(trainer, path, wandb_run_id="r", cfg_hash="h")
+
+    payload = load_checkpoint(path, device)
+    # Should not raise even if the loaded RNG tensor lives on a non-CPU device.
+    _restore_rng(payload["rng"])
+
+
 def test_stub_payload_does_not_trigger_resume(
     tiny_teacher, tiny_student, tiny_loaders, tmp_path, device
 ):
