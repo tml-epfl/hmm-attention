@@ -1,0 +1,34 @@
+_target_: src.teachers.AttentionARTeacher
+
+dim: -1                     # resolved from dataset.dim by preprocess_cfg
+hidden_dim: -1              # resolved to dim by preprocess_cfg
+num_heads: 1
+ff_hidden_dim: -1           # -1 -> hidden_dim
+
+# Memory range. unbounded=true attends over the whole prefix (context_length
+# reports ADAPTIVE); unbounded=false is a fixed order-`window` process.
+unbounded: true
+window: 1                   # Markov window when unbounded=false
+burn_in: null               # min prefix seeded before AR starts; null -> 1 (unbounded) / window (bounded)
+
+scale: 1.0                  # softmax temperature = 1/scale (sharpness)
+
+# Positional encoding (reuses src.model.positional). 'absolute' or 'none'.
+pe_type: absolute
+pe_learnable: false
+pe_max_sequence_length: 512
+
+# Attention flags (reuse src.model MultiHeadAttention via DecoderBlock).
+init_scale: 1.0
+use_query_projection: true
+use_key_projection: true
+use_value_projection: true
+use_output_projection: true
+use_mlp: true
+skip_connection: true
+layer_normalization: true
+attention_disentanglement: false
+attention_bias: true
+
+seed: null                  # set for a reproducible random teacher
+freeze: true

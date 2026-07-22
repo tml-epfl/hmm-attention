@@ -141,7 +141,12 @@ def get_trainer(cfg: DictConfig) -> Optional[Trainer]:
     cfg = preprocess_cfg(cfg)
 
     teacher = instantiate(cfg.teacher)
-    prefix_length = getattr(teacher, "context_length", sum(teacher.span_lengths))
+    # Burn-in seeds the dataset before autoregression: the teacher's minimum
+    # prefix. Equals context_length for bounded teachers; smaller for adaptive
+    # ones (which report context_length == ADAPTIVE).
+    prefix_length = getattr(teacher, "burn_in", None)
+    if prefix_length is None:
+        prefix_length = sum(teacher.span_lengths)
     configure_positional_encoding(cfg, teacher)
 
     with open("config.yaml", "w") as f:

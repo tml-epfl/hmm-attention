@@ -95,3 +95,57 @@ def test_update_kl_metrics_populates_registry(tiny_teacher, tiny_student, device
     ev.update_kl_metrics(fake_student_out, data, split="train", metrics=reg)
     assert reg["teacher/kl/train"].compute() >= 0
     assert reg["teacher_k1/kl/train"].compute() >= 0
+
+
+# ---- adaptive (attention) teacher --------------------------------------------
+
+
+def _adaptive_teacher(dim=6, burn_in=2, seed=0):
+    from src.teachers import AttentionARTeacher
+
+    return AttentionARTeacher(
+        dim=dim, hidden_dim=12, unbounded=True, burn_in=burn_in, seed=seed
+    )
+
+
+def _adaptive_data(teacher, batch=2, extra=4):
+    T = teacher.burn_in + extra
+    ids = torch.randint(0, teacher.dim, (batch, T))
+    return torch.nn.functional.one_hot(ids, num_classes=teacher.dim).float()
+
+
+def test_adaptive_teacher_has_no_lag_cache(device):
+    ev = TeacherEvaluator(_adaptive_teacher(), device=device)
+    assert ev.is_ar is True
+    # Attention has no lag structure: only the full-teacher metric, no crash on
+    # with_lag_restriction, no context_length arithmetic.
+    assert ev._teacher_by_k == {}
+    assert ev.prefix_ks == []
+    assert ev.context_names() == ["teacher"]
+    assert "teacher/kl/train" in ev.metric_keys()
+
+
+def test_adaptive_teacher_align_data_noop(device):
+    t = _adaptive_teacher(burn_in=2)
+    ev = TeacherEvaluator(t, device=device)
+    data = _adaptive_data(t)
+    assert ev._align_data(data, t).shape == data.shape  # burn_ins match -> no trim
+
+
+def test_adaptive_teacher_run_and_kl(device):
+    t = _adaptive_teacher(burn_in=2)
+    ev = TeacherEvaluator(t, device=device)
+    reg = MetricRegistry()
+    from src.metrics import LossMetric
+
+    for key in ev.metric_keys():
+        reg.register(key, LossMetric())
+
+    data = _adaptive_data(t)
+    out, log_probs, _ = ev.run(data, prefix=-1, normalize=False)
+    assert out.shape == (2, data.shape[1] - t.burn_in, t.dim)
+    assert torch.allclose(
+        log_probs.exp().sum(-1), torch.ones_like(log_probs[..., 0]), atol=1e-5
+    )
+    ev.update_kl_metrics(out.clone(), data, split="train", metrics=reg)
+    assert reg["teacher/kl/train"].compute() >= -1e-6  # perfect student -> KL ~ 0

@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - override /model@teacher: hierarchical
+  - override /teacher: hierarchical
   - _self_
 
 # Hierarchical wrapper: hidden vocab = 64, surface vocab = 64, chunk_size = 2.

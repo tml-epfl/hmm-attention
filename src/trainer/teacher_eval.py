@@ -21,7 +21,15 @@ class TeacherEvaluator:
         self.is_ar = isinstance(teacher, ARTeacher)
         self._teacher_by_k: Dict[int, ARTeacher] = {}
         self.prefix_ks: List[int] = []
-        if self.is_ar:
+        # Lag-restricted variants only exist for teachers with an explicit
+        # multi-lag window (LinearARTeacher / HierarchicalTeacher, which override
+        # `with_lag_restriction`). Attention / adaptive teachers have no lag
+        # structure, so they get only the full-teacher metric.
+        supports_lags = (
+            self.is_ar
+            and type(teacher).with_lag_restriction is not ARTeacher.with_lag_restriction
+        )
+        if supports_lags:
             # k == window is a no-op (same as self.teacher); skip to avoid
             # a redundant params clone.
             for k in range(1, teacher.window):
@@ -66,10 +74,14 @@ class TeacherEvaluator:
         return self.teacher
 
     def _align_data(self, data: torch.Tensor, model) -> torch.Tensor:
-        if self.teacher.context_length != model.context_length:
-            return data[
-                :, self.teacher.context_length - model.context_length :, :
-            ]
+        # `unroll` drops `burn_in` leading positions (== context_length for
+        # bounded teachers, so this matches the old alignment). A lag-restricted
+        # teacher has a smaller burn_in and would otherwise emit more positions;
+        # trim the front so both produce the same count. Uses burn_in rather
+        # than context_length so an adaptive teacher (context_length == ADAPTIVE)
+        # aligns correctly (no trim when burn_ins match).
+        if self.teacher.burn_in != model.burn_in:
+            return data[:, self.teacher.burn_in - model.burn_in :, :]
         return data
 
     def run(

@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - dataset: classification/softmax
-  - model@teacher: linear
+  - teacher: linear
   - model@student: transformer
   - model@ngrams.unigram: unigram
   - model@ngrams.bigram: bigram

@@ -92,9 +92,11 @@ class ProbeLogger:
             return
 
         # Adaptive default: cover the base teacher's AR context window on the
-        # retention side, plus one step of lookahead.
+        # retention side, plus one step of lookahead. `burn_in` == context_length
+        # for bounded bases; for an adaptive (unbounded) base there is no finite
+        # window, so burn_in is the finite fallback — override via probe_offsets.
         if cfg.probe_offsets is None:
-            base_ctx = teacher.base_teacher.context_length
+            base_ctx = teacher.base_teacher.burn_in
             self.offsets: List[int] = list(range(-base_ctx, 2))
         else:
             self.offsets = list(cfg.probe_offsets)

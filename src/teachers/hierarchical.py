@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.teachers.base import ARTeacher
+from src.teachers.base import ADAPTIVE, ARTeacher
 
 
 class HierarchicalTeacher(ARTeacher):
@@ -72,7 +72,15 @@ class HierarchicalTeacher(ARTeacher):
 
     @property
     def context_length(self) -> int:
+        if self.base_teacher.is_adaptive:
+            return ADAPTIVE
         return self.base_teacher.context_length * self.chunk_size
+
+    @property
+    def burn_in(self) -> int:
+        # A whole number of chunks, so HierarchicalPredictor's chunk-alignment
+        # check on the burn-in prefix holds for both bounded and adaptive bases.
+        return self.base_teacher.burn_in * self.chunk_size
 
     @property
     def hidden_dim(self) -> int:
@@ -98,8 +106,16 @@ class HierarchicalTeacher(ARTeacher):
         """Predict slot 0 of the *next* chunk, given a chunk-aligned context.
 
         context: (B, context_length, chunk_dim). Returns (B, chunk_dim) log-probs.
+        With an adaptive base, any chunk-aligned length is accepted (the base
+        conditions on all of it).
         """
-        if context.shape[-2] != self.context_length:
+        if self.is_adaptive:
+            if context.shape[-2] % self.chunk_size != 0:
+                raise ValueError(
+                    f"adaptive context length {context.shape[-2]} is not chunk-aligned "
+                    f"(chunk_size={self.chunk_size})"
+                )
+        elif context.shape[-2] != self.context_length:
             raise ValueError(
                 f"context has {context.shape[-2]} tokens; expected {self.context_length}"
             )
@@ -125,18 +141,21 @@ class HierarchicalTeacher(ARTeacher):
         returns the conditional distribution over slot s.
         """
         T = prefix.shape[-2]
-        if T < self.context_length:
-            raise ValueError(
-                f"prefix length {T} < context_length {self.context_length}"
-            )
+        if T < self.burn_in:
+            raise ValueError(f"prefix length {T} < burn_in {self.burn_in}")
 
         s = T % self.chunk_size
-        needed = self.context_length + s
-        if T > needed:
-            prefix = prefix[..., -needed:, :]
+        if self.base_teacher.is_adaptive:
+            # Adaptive base: decode *every* whole chunk and pass all of it down.
+            aligned_len = T - s
+        else:
+            # Bounded base: keep exactly the last context_length aligned tokens.
+            aligned_len = self.context_length
+            needed = aligned_len + s
+            if T > needed:
+                prefix = prefix[..., -needed:, :]
 
-        # First context_length tokens are chunk-aligned.
-        context_surface = prefix[..., : self.context_length, :]
+        context_surface = prefix[..., :aligned_len, :]
         context_hidden = self._decode_chunk_aligned(context_surface)
         hidden_log_probs = self.base_teacher.next_token_log_probs(context_hidden)
 
@@ -145,7 +164,7 @@ class HierarchicalTeacher(ARTeacher):
             B, self.chunk_size, dtype=torch.long, device=prefix.device
         )
         if s > 0:
-            partial = prefix[..., self.context_length :, :]  # (B, s, chunk_dim)
+            partial = prefix[..., aligned_len : aligned_len + s, :]  # (B, s, chunk_dim)
             observed[:, :s] = partial.argmax(dim=-1)
 
         return self._hidden_probs_to_surface_logprobs(
@@ -171,16 +190,18 @@ class HierarchicalTeacher(ARTeacher):
             raise ValueError(
                 f"sequence length {L_surf} must be a multiple of chunk_size {self.chunk_size}"
             )
-        if L_surf <= self.context_length:
+        if L_surf <= self.burn_in:
             raise ValueError(
-                f"sequence length {L_surf} must exceed context_length {self.context_length}"
+                f"sequence length {L_surf} must exceed burn_in {self.burn_in}"
             )
         L_h = L_surf // self.chunk_size
 
         hidden = self._decode_chunk_aligned(sequence)  # (B, L_h, hidden_dim)
-        hidden_log_probs = self.base_teacher.unroll(hidden)  # (B, L_h - base_ctx_h, hidden_dim)
+        hidden_log_probs = self.base_teacher.unroll(hidden)  # (B, L_h - base_burn_in, hidden_dim)
         L_out_h = hidden_log_probs.shape[1]
-        ctx_surf = self.context_length
+        # burn_in == context_length for bounded bases, so this offset is correct
+        # for both regimes.
+        ctx_surf = self.burn_in
 
         # Slot indices of the *predicted* chunks (for mid-chunk conditioning).
         pred_slot_idx = (

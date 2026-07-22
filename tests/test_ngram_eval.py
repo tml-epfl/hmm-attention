@@ -23,6 +23,9 @@ class _StubTeacher:
         self.stride = stride
         if context_length is not None:
             self.context_length = context_length
+            # Invariant: burn_in == context_length for a bounded teacher; the
+            # ngram slice offsets by burn_in.
+            self.burn_in = context_length
 
 
 def _make_evaluator(teacher, model, name="bigram"):

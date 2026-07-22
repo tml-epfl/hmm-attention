@@ -39,8 +39,10 @@ class NgramEvaluator:
 
     def _slice_data(self, data: torch.Tensor) -> Tuple[torch.Tensor, Optional[int]]:
         """Drop the leading context the ngram model doesn't consume."""
+        # Teacher's unroll drops `burn_in` leading positions (== context_length
+        # for bounded teachers); align the ngram slice to the same offset.
         teacher_context = getattr(
-            self.teacher, "context_length", sum(self.teacher.span_lengths)
+            self.teacher, "burn_in", sum(self.teacher.span_lengths)
         )
         stride: Optional[int] = getattr(self.teacher, "stride", None)
         if stride is not None:

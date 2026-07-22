@@ -51,8 +51,9 @@ def test_predict_next_auto_slices_long_prefix(tiny_teacher):
 
 
 def test_predict_next_rejects_short_prefix(tiny_teacher):
-    short = torch.zeros(1, tiny_teacher.context_length - 1, tiny_teacher.dim)
-    with pytest.raises(ValueError, match="context_length"):
+    # burn_in == context_length for bounded teachers; the guard now names burn_in.
+    short = torch.zeros(1, tiny_teacher.burn_in - 1, tiny_teacher.dim)
+    with pytest.raises(ValueError, match="burn_in"):
         tiny_teacher.predict_next(short)
 
 

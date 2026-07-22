@@ -6,6 +6,12 @@ import torch.nn as nn
 
 from src.utils import split_into_windows
 
+# Sentinel `context_length` for teachers that condition on the *entire* prefix
+# (e.g. attention) rather than a fixed Markov window. Kept an int so downstream
+# `getattr(teacher, "context_length")` reads stay typed; logic that must
+# distinguish the two regimes checks `is_adaptive` / this sentinel directly.
+ADAPTIVE = -1
+
 
 class ARTeacher(nn.Module, ABC):
     """Abstract autoregressive teacher.
@@ -29,7 +35,37 @@ class ARTeacher(nn.Module, ABC):
     @property
     @abstractmethod
     def context_length(self) -> int:
-        """Number of tokens the teacher looks at to predict the next one."""
+        """Number of tokens the teacher conditions on to predict the next one.
+
+        Returns `ADAPTIVE` for teachers that condition on the *entire* prefix
+        (unbounded memory) rather than a fixed Markov window.
+        """
+
+    @property
+    def is_adaptive(self) -> bool:
+        """Whether the teacher conditions on the whole prefix (vs a fixed window)."""
+        return self.context_length == ADAPTIVE
+
+    @property
+    def burn_in(self) -> int:
+        """Minimum prefix length before the teacher can predict — i.e. how many
+        tokens the dataset seeds before autoregression starts.
+
+        **Invariant:** for non-adaptive teachers `burn_in == context_length`
+        (this default). Downstream alignment — the bounded `unroll` offset,
+        `TeacherEvaluator._align_data`, `NgramEvaluator._slice_data` — relies on
+        this, so bounded teachers must not diverge.
+
+        Adaptive teachers (`context_length == ADAPTIVE`) have no window to fall
+        back on, so `burn_in` isn't derivable here — they **must** override this
+        with their own positive minimum.
+        """
+        if self.is_adaptive:
+            raise NotImplementedError(
+                f"{type(self).__name__} is adaptive and must define `burn_in` "
+                "(context_length is ADAPTIVE, so there is no window to default to)."
+            )
+        return self.context_length
 
     @abstractmethod
     def next_token_log_probs(self, context: torch.Tensor) -> torch.Tensor:
@@ -47,16 +83,32 @@ class ARTeacher(nn.Module, ABC):
     def predict_next(self, prefix: torch.Tensor) -> torch.Tensor:
         """Autoregressive single-step prediction (log-probs).
 
-        Auto-slices to the trailing `context_length` tokens so callers can hand
-        any prefix `>= context_length` in length.
+        Requires at least `burn_in` tokens. Bounded teachers then condition on
+        the trailing `context_length` tokens; adaptive teachers
+        (`context_length == ADAPTIVE`) condition on the entire prefix.
         """
-        if prefix.shape[-2] < self.context_length:
-            raise ValueError(
-                f"prefix length {prefix.shape[-2]} < context_length {self.context_length}"
-            )
-        if prefix.shape[-2] > self.context_length:
+        T = prefix.shape[-2]
+        if T < self.burn_in:
+            raise ValueError(f"prefix length {T} < burn_in {self.burn_in}")
+        if self.context_length != ADAPTIVE and T > self.context_length:
             prefix = prefix[..., -self.context_length :, :]
         return self.next_token_log_probs(prefix)
+
+    def sequence_log_probs(self, sequence: torch.Tensor) -> torch.Tensor:
+        """Causal per-position next-token log-probs in one shot.
+
+        Returns (B, L, dim) where position `t` is the log-prob distribution over
+        token `t+1` conditioned on `sequence[:, : t+1, :]`. Must be **causal**:
+        position `t` sees only tokens `0..t`.
+
+        Optional. Teachers with a natural full-sequence forward (attention,
+        transformers) implement this once and get `unroll` — hence per-position
+        evaluation — for free. Bounded teachers can instead rely on the default
+        windowed `unroll` and leave this unimplemented.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement `sequence_log_probs`."
+        )
 
     def unroll(
         self,
@@ -65,22 +117,31 @@ class ARTeacher(nn.Module, ABC):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Per-position predictions over a full sequence.
 
-        For each output position `j`, predicts `sequence[:, context_length + j, :]`
-        from context `sequence[:, j : j + context_length, :]`.
+        Output `j` predicts `sequence[:, burn_in + j, :]`. Bounded teachers
+        vectorize a fixed-window sweep via `split_into_windows`. Adaptive
+        teachers get this for free from their causal `sequence_log_probs`: a
+        single forward whose position `t` predicts token `t+1`, so predictions
+        for tokens `burn_in..L-1` are positions `burn_in-1..L-2`.
 
         Args:
-            sequence: shape (B, L, dim). Must satisfy L >= context_length + 1.
+            sequence: shape (B, L, dim). Must satisfy L >= burn_in + 1.
             return_targets: if True, also return the ground-truth next tokens
-                shape (B, L - context_length, dim).
+                shape (B, L - burn_in, dim).
 
         Returns:
-            Either log-probs (B, L - context_length, dim) or a (log_probs, targets) tuple.
+            Either log-probs (B, L - burn_in, dim) or a (log_probs, targets) tuple.
         """
         B, L, D = sequence.shape
-        if L <= self.context_length:
+        if L <= self.burn_in:
             raise ValueError(
-                f"sequence length {L} must exceed context_length {self.context_length}"
+                f"sequence length {L} must exceed burn_in {self.burn_in}"
             )
+        if self.context_length == ADAPTIVE:
+            all_log_probs = self.sequence_log_probs(sequence)  # (B, L, dim)
+            log_probs = all_log_probs[:, self.burn_in - 1 : L - 1, :]
+            if return_targets:
+                return log_probs, sequence[:, self.burn_in :, :]
+            return log_probs
         contexts, targets = split_into_windows(
             seq=sequence, window=self.context_length, pad=0
         )
