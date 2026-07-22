@@ -153,27 +153,7 @@ def log_attention_heatmap(
 
     images: List[wandb.Image] = []
 
-    # Per-head heatmaps
-    for h in range(num_heads):
-        fig = plt.figure(figsize=(4, 4))
-        sns.heatmap(
-            attn[h],
-            vmin=0.0,
-            vmax=1.0,
-            cmap="Blues",
-            xticklabels=token_seq,
-            yticklabels=token_seq,
-            cbar=True,
-        )
-        plt.title(f"Head {h}")
-        plt.xlabel("Position")
-        plt.ylabel("Position")
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        images.append(wandb.Image(fig, caption=f"Head {h}"))
-        plt.close(fig)
-
-    # Average heatmap
+    # Average heatmap first (index 0).
     fig = plt.figure(figsize=(4, 4))
     sns.heatmap(
         attn.mean(axis=0),
@@ -191,6 +171,26 @@ def log_attention_heatmap(
     plt.tight_layout()
     images.append(wandb.Image(fig, caption="Average"))
     plt.close(fig)
+
+    # Per-head heatmaps (1-indexed).
+    for h in range(num_heads):
+        fig = plt.figure(figsize=(4, 4))
+        sns.heatmap(
+            attn[h],
+            vmin=0.0,
+            vmax=1.0,
+            cmap="Blues",
+            xticklabels=token_seq,
+            yticklabels=token_seq,
+            cbar=True,
+        )
+        plt.title(f"Head {h + 1}")
+        plt.xlabel("Position")
+        plt.ylabel("Position")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        images.append(wandb.Image(fig, caption=f"Head {h + 1}"))
+        plt.close(fig)
 
     run.log({log_key: images}, step=step)
 
@@ -299,7 +299,7 @@ def log_value_matrix_alignment(
       - student_norm(h): ||W_h||_F, the overall scale of the student value matrix.
 
     Logs:
-      - Scalars {split}_value_student_norm_head{h} for each head.
+      - Scalars {split}_value_student_norm_head{h+1} for each head.
       - Heatmap image {split}_value_cosine_sim: (num_heads × num_teacher), range [-1, 1].
       - Heatmap image {split}_value_proj_norm: (num_heads × num_teacher).
 
@@ -367,15 +367,15 @@ def log_value_matrix_alignment(
             cos_sim_mat[h, k] = cos
             proj_norm_mat[h, k] = w_norm * cos  # signed projection norm
 
-    row_labels = [f"Head {h}" for h in range(num_heads)]
-    col_labels = [f"Teacher {k}" for k in range(num_teacher)]
+    row_labels = [f"Head {h + 1}" for h in range(num_heads)]
+    col_labels = [f"Teacher {k + 1}" for k in range(num_teacher)]
 
     log_dict: dict = {}
     scope = layer_name or f"L{layer + 1}"
 
     # Per-head student norms as scalars.
     for h, norm in enumerate(student_norms):
-        log_dict[f"attn/{scope}/value_norm_head{h}/{split}"] = norm
+        log_dict[f"attn/{scope}/value_norm_head{h + 1}/{split}"] = norm
 
     # Heatmap: cosine similarity (all pairs).
     log_dict[f"attn/{scope}/value_cos_sim/{split}"] = _heatmap_image(
@@ -423,15 +423,15 @@ def log_value_alignment_scalars(
     direction to cancel cross-terms — a cooperative correction mechanism.
 
     For every (student head h, teacher matrix k) pair, logs:
-      - ``{split}_value_cosine_head{h}_teacher{k}``:
+      - ``{split}_value_cosine_head{h+1}_teacher{k+1}``:
             Frobenius cosine similarity (direction only, range [-1, 1]).
-      - ``{split}_value_inner_head{h}_teacher{k}``:
+      - ``{split}_value_inner_head{h+1}_teacher{k+1}``:
             Raw Frobenius inner product <V_h, A*_k>.  Scales with dim²;
             use the cosine variant for normalized comparison.
 
     wandb visualization: group by *teacher* (feature) to get one panel per
     feature direction with lines per head — matching the paper's figure.
-      - Feature (j) panel: ``{split}_value_inner_head*_teacher{j}``
+      - Feature (j) panel: ``{split}_value_inner_head*_teacher{j+1}``
 
     Only operates when attention_disentanglement=True.
 
@@ -491,8 +491,8 @@ def log_value_alignment_scalars(
             inner = float(np.dot(w, a))
             # Cosine similarity: normalized to [-1, 1]
             cos = inner / (w_norm * a_norm) if a_norm > 0 else 0.0
-            log_dict[f"attn/{scope}/value_cos_head{h}_teacher{k}/{split}"] = cos
-            log_dict[f"attn/{scope}/value_inner_head{h}_teacher{k}/{split}"] = inner
+            log_dict[f"attn/{scope}/value_cos_head{h + 1}_teacher{k + 1}/{split}"] = cos
+            log_dict[f"attn/{scope}/value_inner_head{h + 1}_teacher{k + 1}/{split}"] = inner
 
     run.log(log_dict, step=step)
 
@@ -516,7 +516,7 @@ def log_attention_alignment(
         direction = ||attn_h||_2 * cos_sim(h, k).
 
     Logs:
-      - Scalars {split}_attn_student_norm_head{h} for each head.
+      - Scalars {split}_attn_student_norm_head{h+1} for each head.
       - Heatmap image {split}_attn_cosine_sim: (num_heads × num_spans).
       - Heatmap image {split}_attn_proj_norm: (num_heads × num_spans).
       - Per-head bar charts {split}_attn_offset_charts comparing the last-query
@@ -564,14 +564,14 @@ def log_attention_alignment(
             cos_sim_mat[h, k] = cos
             proj_norm_mat[h, k] = p_norm * cos  # signed projection norm
 
-    row_labels = [f"Head {h}" for h in range(num_heads)]
-    col_labels = [f"Span {k}" for k in range(num_spans)]
+    row_labels = [f"Head {h + 1}" for h in range(num_heads)]
+    col_labels = [f"Span {k + 1}" for k in range(num_spans)]
 
     log_dict: dict = {}
 
     # Per-head student norms as scalars.
     for h, norm in enumerate(student_norms):
-        log_dict[f"attn/{layer_name}/align_norm_head{h}/{split}"] = norm
+        log_dict[f"attn/{layer_name}/align_norm_head{h + 1}/{split}"] = norm
 
     # Heatmap: cosine similarity (all pairs).
     log_dict[f"attn/{layer_name}/align_cos_sim/{split}"] = _heatmap_image(
@@ -612,7 +612,7 @@ def log_attention_alignment(
 
         # Student attention.
         axes[0].bar(positions, pred_ctx, color="steelblue")
-        axes[0].set_title(f"Head {h}\n(student)", fontsize=9)
+        axes[0].set_title(f"Head {h + 1}\n(student)", fontsize=9)
         axes[0].set_xlabel("Key pos")
         axes[0].set_ylabel("Weight")
 
@@ -621,13 +621,13 @@ def log_attention_alignment(
             gt_ctx = gt[k, context_start:]
             axes[k + 1].bar(positions, gt_ctx, color="coral", alpha=0.8)
             axes[k + 1].set_title(
-                f"GT span {k}\ncos={cos_sim_mat[h, k]:.2f}", fontsize=9
+                f"GT span {k + 1}\ncos={cos_sim_mat[h, k]:.2f}", fontsize=9
             )
             axes[k + 1].set_xlabel("Key pos")
 
-        fig.suptitle(f"Head {h} — last-query attention ({split}, step {step})", fontsize=10)
+        fig.suptitle(f"Head {h + 1} — last-query attention ({split}, step {step})", fontsize=10)
         plt.tight_layout()
-        bar_images.append(wandb.Image(fig, caption=f"Head {h}"))
+        bar_images.append(wandb.Image(fig, caption=f"Head {h + 1}"))
         plt.close(fig)
 
     log_dict[f"attn/{layer_name}/offset_charts/{split}"] = bar_images
@@ -657,7 +657,7 @@ def log_attention_span_mass(
     i.e. the total attention the last token places on span k's positions,
     averaged across all sequences in the batch.
 
-    Logged as wandb scalars ``{split}_attn_mass_head{h}_span{k}``.
+    Logged as wandb scalars ``{split}_attn_mass_head{h+1}_span{k+1}``.
 
     wandb visualization: group by *span* to get one panel per position group
     with lines per head — matching the paper's attention position weight figure.
@@ -684,6 +684,6 @@ def log_attention_span_mass(
     for k, (start, end) in enumerate(ranges):
         for h in range(num_heads):
             mass = float(last_rows[h, start:end].sum())
-            log_dict[f"attn/{layer_name}/span_mass_head{h}_span{k}/{split}"] = mass
+            log_dict[f"attn/{layer_name}/span_mass_head{h + 1}_span{k + 1}/{split}"] = mass
 
     run.log(log_dict, step=step)
