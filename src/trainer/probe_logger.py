@@ -210,10 +210,11 @@ class ProbeLogger:
         self._val_data.append(self._current_data)
 
     def log(self, step: int, split: str) -> None:
-        if not self.enabled or self.writer is None:
-            self._clear_val_buffers()
+        if not self.enabled:
+            # Disabled: __init__ returned early, so num_layers/buffers were never
+            # set — and nothing was collected (collect_* guard on `enabled`).
             return
-        if step % self.cfg.probe_frequency != 0:
+        if self.writer is None or step % self.cfg.probe_frequency != 0:
             self._clear_val_buffers()
             return
         if not self._val_data:

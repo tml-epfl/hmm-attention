@@ -1,0 +1,10 @@
+defaults:
+  - /model/transformer@_here_  # reuse the transformer model as a frozen teacher
+  - _self_
+
+# Remove positional information using flat parameters.
+pe_type: none
+
+# Set geometric per-head scaling factor.
+semantic_baseline: true
+per_head_alpha: 1.9

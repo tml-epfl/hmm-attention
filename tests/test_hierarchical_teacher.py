@@ -244,7 +244,10 @@ def test_hierarchical_teacher_stochastic():
         rank=hidden_dim,
         window=window,
         multiplicative_constant=1.7,
-        scale=10.0,
+        # High scale -> the hidden posterior is effectively a delta on the
+        # realized (argmax) hidden id, so the only residual slot-1 uncertainty
+        # comes from within-hidden-id slot-0 collisions (see S4).
+        scale=50.0,
     )
     ht = HierarchicalTeacher(
         base_teacher=base,
@@ -317,20 +320,39 @@ def test_hierarchical_teacher_stochastic():
     print(f"slot-0 support size: min={int(supp_sizes.min())}  mean={supp_sizes.mean():.2f}")
     assert supp_sizes.min().item() >= 2, "[FAIL] slot-0 support size < 2 somewhere"
 
-    # ---- 4. slot-1 becomes deterministic once slot 0 is observed ----
-    _hr("[S4] SLOT-1 IS A DELTA GIVEN OBSERVED SLOT 0")
+    # ---- 4. slot-1 is a delta IFF slot 0 disambiguates the tuple ----
+    # "all possible tuples" chunk-gen lets two tuples of the same hidden id share
+    # slot 0, so slot 0 alone need not pin (h, m). True invariant: with a
+    # (near-)certain hidden id, slot 1 is deterministic exactly when the realized
+    # slot 0 is unique among that hidden id's M tuples; otherwise it's a mixture.
+    _hr("[S4] SLOT-1 IS A DELTA IFF SLOT-0 DISAMBIGUATES THE TUPLE")
     L_out = log_probs.shape[1]
     slot1_positions = torch.arange(1, L_out, chunk_size)
-    slot1_top = surface_probs[:, slot1_positions].max(dim=-1).values
-    print(f"slot-1 max prob: min={slot1_top.min():.4f}  mean={slot1_top.mean():.4f}")
-    # Because supports are globally disjoint, observing slot 0 pins down (h, m)
-    # up to at most as many (h, m) as share that slot-0 value; with confident h
-    # and disjoint tuples, we expect near-1.
-    slot1_pred = surface_probs[:, slot1_positions].argmax(dim=-1)
-    slot1_targ = targets[:, slot1_positions].argmax(dim=-1)
-    slot1_acc = (slot1_pred == slot1_targ).float().mean().item()
-    print(f"slot-1 accuracy: {slot1_acc:.4f}")
-    assert slot1_acc > 0.95, f"[FAIL] slot-1 accuracy {slot1_acc:.3f} < 0.95"
+    slot1_pred = surface_probs[:, slot1_positions].argmax(dim=-1)  # (B, n)
+    slot1_targ = targets[:, slot1_positions].argmax(dim=-1)  # (B, n)
+    slot1_top = surface_probs[:, slot1_positions].max(dim=-1).values  # (B, n)
+
+    # Realized (h, m) of each predicted chunk (base conditions on `window` hidden
+    # tokens, so predicted chunks start at hidden index `window`).
+    pred_h = hidden_ids_batched[:, window:]  # (B, n)
+    pred_m = tuple_ids[:, window:]  # (B, n)
+    s0 = ht._chunk_slot_indices[pred_h, pred_m, 0]  # (B, n) realized slot-0
+    share = (ht._chunk_slot_indices[pred_h, :, 0] == s0.unsqueeze(-1)).sum(-1)
+    unique = share == 1  # slot-0 pins the tuple within its hidden id
+    print(f"predicted chunks: {unique.numel()}, slot-0-unique: {int(unique.sum())}")
+
+    if unique.any():
+        acc_unique = (slot1_pred[unique] == slot1_targ[unique]).float().mean().item()
+        print(f"slot-1 accuracy | slot-0 unique: {acc_unique:.4f}")
+        assert acc_unique == 1.0, (
+            f"[FAIL] slot-1 not deterministic where slot-0 is unique: {acc_unique:.3f}"
+        )
+    if (~unique).any():
+        max_top_ambiguous = slot1_top[~unique].max().item()
+        print(f"slot-1 top-prob | slot-0 ambiguous: max={max_top_ambiguous:.4f}")
+        assert max_top_ambiguous < 1.0 - 1e-6, (
+            "[FAIL] slot-0-ambiguous positions collapsed to deltas"
+        )
 
     # ---- 5. AR vs unrolled consistency ----
     _hr("[S5] AR vs UNROLLED CONSISTENCY")

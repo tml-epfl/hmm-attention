@@ -1,6 +1,9 @@
+# @package _global_
+# Data-scaling sweep: for each base experiment, sweep the training set size.
+# Launch with the ray launcher, e.g.:
+#   python train.py experiments=dataset --multirun
 defaults:
-  - train
-  - override hydra/launcher: ray
+  - override /hydra/launcher: ray
 
 hydra:
   sweeper:
