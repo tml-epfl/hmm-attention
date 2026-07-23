@@ -1,18 +1,16 @@
 defaults:
-  - attention@base_teacher
+  - base_teacher: attention
   - _self_
 
-# Configurable multi-level chunk-composed teacher (hierarchical HMM) on top of
-# the attention base. `levels` is ordered top->bottom: levels[0] is adjacent to
-# the base, levels[-1] emits surface tokens. Each level's `chunk_dim` is its
-# output alphabet (= the next level's input alphabet); the surface vocab is the
-# last level's chunk_dim. The base (top) alphabet is `base_teacher.dim` and must
-# be set explicitly — it has no natural default.
+# Configurable multi-level chunk-composed teacher (hierarchical HMM). `levels` is
+# ordered top->bottom: levels[0] is adjacent to the base, levels[-1] emits surface
+# tokens. Each level's `chunk_dim` is its output alphabet (= the next level's input
+# alphabet); the surface vocab is the last level's chunk_dim. The base (top)
+# alphabet is `base_teacher.dim` and must be set explicitly per experiment.
+#
+# Base process is a swappable group: `override /teacher/base_teacher: linear`
+# selects a linear base (see conf/teacher/base_teacher/).
 _target_: src.teachers.MultiLevelHierarchicalTeacher.from_level_specs
-
-base_teacher:
-  dim: 32                 # top alphabet A_L (set per experiment)
-  hidden_dim: null        # null -> dim (attention.yaml default is the -1 sentinel)
 
 levels:                   # top -> bottom
   - {chunk_dim: -1, chunk_size: 2, num_tuples: 1, chunk_seed: null}  # chunk_dim -1 -> dataset.dim (surface)

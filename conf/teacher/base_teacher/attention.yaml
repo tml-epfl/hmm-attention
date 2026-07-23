@@ -1,0 +1,8 @@
+defaults:
+  - /teacher/attention@_here_
+  - _self_
+
+# Reuse conf/teacher/attention.yaml, but as a *nested* base it is not touched by
+# preprocess_cfg, so resolve hidden_dim here (null -> dim) instead of via the -1
+# sentinel. `dim` (the top alphabet) still has no default — set it per experiment.
+hidden_dim: null
