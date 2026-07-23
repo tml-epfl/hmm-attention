@@ -4,6 +4,7 @@ from src.predictors.base import Predictor
 from src.predictors.classification import (
     ClassificationPredictor,
     HierarchicalPredictor,
+    MultiLevelHierarchicalPredictor,
 )
 from src.predictors.regression import RegressionPredictor
 
@@ -11,6 +12,7 @@ __all__ = [
     "Predictor",
     "ClassificationPredictor",
     "HierarchicalPredictor",
+    "MultiLevelHierarchicalPredictor",
     "RegressionPredictor",
     "build_predictor",
 ]
@@ -31,9 +33,11 @@ def build_predictor(
     """
     # Local import keeps the package importable without materializing the whole
     # teacher hierarchy at module load.
-    from src.teachers import HierarchicalTeacher
+    from src.teachers import HierarchicalTeacher, MultiLevelHierarchicalTeacher
 
     if kind == "classification":
+        if isinstance(teacher, MultiLevelHierarchicalTeacher):
+            return MultiLevelHierarchicalPredictor(teacher, argmax=argmax)
         if isinstance(teacher, HierarchicalTeacher):
             return HierarchicalPredictor(teacher, argmax=argmax)
         return ClassificationPredictor(teacher, argmax=argmax)

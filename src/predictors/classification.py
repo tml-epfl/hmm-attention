@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 
 from src.predictors.base import Predictor
-from src.teachers import HierarchicalTeacher
+from src.teachers import HierarchicalTeacher, MultiLevelHierarchicalTeacher
 
 
 class ClassificationPredictor(Predictor):
@@ -121,3 +121,30 @@ class HierarchicalPredictor(ClassificationPredictor):
         )
         chunks = table[hidden_ids, tuple_ids]  # (B, n_hidden, chunk_size, chunk_dim)
         return chunks.reshape(batch_size, length, self.teacher.chunk_dim).cpu()
+
+
+class MultiLevelHierarchicalPredictor(ClassificationPredictor):
+    """Sampler specialized for `MultiLevelHierarchicalTeacher`.
+
+    Like `HierarchicalPredictor`, but burn-in prefixes are sampled top-down
+    through the full level stack (`sample_surface_prefix`), so every burn-in
+    token is a legitimate slot of some base token's nested expansion.
+    """
+
+    def __init__(self, teacher, argmax: bool = False) -> None:
+        if not isinstance(teacher, MultiLevelHierarchicalTeacher):
+            raise TypeError(
+                f"MultiLevelHierarchicalPredictor requires a "
+                f"MultiLevelHierarchicalTeacher; got {type(teacher).__name__}"
+            )
+        super().__init__(teacher=teacher, argmax=argmax)
+
+    def random_burn_in(self, length: int) -> Optional[torch.Tensor]:
+        return self.teacher.sample_surface_prefix(length).cpu()
+
+    def random_burn_in_batch(
+        self, batch_size: int, length: int
+    ) -> Optional[torch.Tensor]:
+        return self.teacher.sample_surface_prefix(
+            length, batch_size=batch_size
+        ).cpu()
